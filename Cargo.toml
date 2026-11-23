@@ -2,5 +2,9 @@
 name = "fledgling"
 version = "0.1.0"
 edition = "2024"
+description = "An early-stage CLI for managing database schemas as code."
+license = "MIT"
+repository = "https://github.com/kmiller96/fledgling"
 
 [dependencies]
+clap = { version = "4.6.9", features = ["derive"] }
