@@ -107,6 +107,7 @@ fn run(Cli { config, command }: Cli) -> Result<(), Box<dyn Error>> {
     let Config {
         dialect,
         database,
+        postgres_database_url,
         migrations,
         schema,
     } = Config::read(&config).map_err(|error| format!("reading {}: {error}", config.display()))?;
@@ -116,11 +117,23 @@ fn run(Cli { config, command }: Cli) -> Result<(), Box<dyn Error>> {
     match command {
         Command::Init => unreachable!(),
         Command::Pull(args) => {
-            let database = required(args.database.or(args.database_pos).or(database), "database")?;
+            let database = required(
+                args.database
+                    .or(args.database_pos)
+                    .or_else(|| postgres_database_url.clone().map(PathBuf::from))
+                    .or(database),
+                "database",
+            )?;
             print!("{}", pull(dialect, &database)?);
         }
         Command::Status(args) => {
-            let database = required(args.database.or(args.database_pos).or(database), "database")?;
+            let database = required(
+                args.database
+                    .or(args.database_pos)
+                    .or_else(|| postgres_database_url.clone().map(PathBuf::from))
+                    .or(database),
+                "database",
+            )?;
             for id in status(dialect, &database)? {
                 println!("{id:06}");
             }
@@ -130,6 +143,7 @@ fn run(Cli { config, command }: Cli) -> Result<(), Box<dyn Error>> {
                 args.database
                     .database
                     .or(args.database.database_pos)
+                    .or_else(|| postgres_database_url.clone().map(PathBuf::from))
                     .or(database),
                 "database",
             )?;
@@ -168,7 +182,8 @@ fn run(Cli { config, command }: Cli) -> Result<(), Box<dyn Error>> {
                 "schema",
             )?;
             if show_preview {
-                if let Some((up, down)) = preview(dialect, &migrations, &schema)? {
+                let plan = preview(dialect, &migrations, &schema)?;
+                if let Some((up, down)) = plan {
                     println!("-- Up\n{up}\n\n-- Down\n{down}");
                 } else {
                     println!("No schema changes.");

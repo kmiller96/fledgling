@@ -40,32 +40,12 @@ fn resolve_paths<const N: usize>(base: &Path, paths: [Option<PathBuf>; N]) -> [O
 
 /// Decode `sqlite:` with optional `//` as a literal path, not a general URL.
 /// Empty paths, query strings, fragments, and NULs are not accepted.
-fn sqlite_database_path<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> Result<Option<PathBuf>, D::Error> {
-    let Some(url) = Option::<String>::deserialize(deserializer)? else {
-        return Ok(None);
-    };
+fn sqlite_database_path(url: String) -> Result<PathBuf, String> {
     let path = url
         .strip_prefix("sqlite:")
         .map(|path| path.strip_prefix("//").unwrap_or(path))
         .filter(|path| !path.trim().is_empty() && !path.contains(['?', '#', '\0']));
-    path.map(PathBuf::from).map(Some).ok_or_else(|| {
-        serde::de::Error::custom(
-            "database_url must be a SQLite URL with a file path (sqlite://example.db) or sqlite::memory:",
-        )
-    })
-}
-
-/// Serialize a present path with the `sqlite://` prefix, without URL escaping.
-fn sqlite_database_url<S: serde::Serializer>(
-    database: &Option<PathBuf>,
-    serializer: S,
-) -> Result<S::Ok, S::Error> {
-    database
-        .as_ref()
-        .map(|path| format!("sqlite://{}", path.display()))
-        .serialize(serializer)
+    path.map(PathBuf::from).ok_or_else(|| "database_url must be a SQLite URL with a file path (sqlite://example.db) or sqlite::memory:".into())
 }
 
 // ----------------------------------------------------------------------------
@@ -73,7 +53,7 @@ fn sqlite_database_url<S: serde::Serializer>(
 // ----------------------------------------------------------------------------
 
 /// On-disk TOML envelope; project settings are nested under `[fledgling]`.
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Document {
     fledgling: Config,
@@ -88,8 +68,7 @@ const DEFAULT_MIGRATIONS_PATH: &str = "migrations";
 const DEFAULT_SQLITE_PATH: &str = "example.db";
 
 /// Project settings; commands choose which optional paths they require.
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug)]
 pub struct Config {
     /// SQL dialect used by the project.
     pub dialect: Dialect,
@@ -102,13 +81,63 @@ pub struct Config {
 
     /// SQLite path from TOML `database_url`, resolved like the other paths
     /// except for `:memory:`, which stays literal.
-    #[serde(
-        rename = "database_url",
-        default,
-        deserialize_with = "sqlite_database_path",
-        serialize_with = "sqlite_database_url"
-    )]
     pub database: Option<PathBuf>,
+
+    /// Live PostgreSQL database URL used for schema inspection and migrations.
+    pub postgres_database_url: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for Config {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Raw {
+            dialect: Dialect,
+            schema: Option<PathBuf>,
+            migrations: Option<PathBuf>,
+            #[serde(default)]
+            database_url: Option<String>,
+        }
+        let raw = Raw::deserialize(deserializer)?;
+        let (database, postgres_database_url) = match (raw.dialect, raw.database_url) {
+            (Dialect::SQLite, Some(url)) => (
+                Some(sqlite_database_path(url).map_err(serde::de::Error::custom)?),
+                None,
+            ),
+            (Dialect::SQLite, None) => (None, None),
+            (Dialect::Postgres, Some(url))
+                if url.starts_with("postgres://") || url.starts_with("postgresql://") =>
+            {
+                (None, Some(url))
+            }
+            (Dialect::Postgres, Some(_)) => {
+                return Err(serde::de::Error::custom(
+                    "PostgreSQL database_url must use postgres:// or postgresql://",
+                ));
+            }
+            (Dialect::Postgres, None) => (None, None),
+        };
+        Ok(Self {
+            dialect: raw.dialect,
+            schema: raw.schema,
+            migrations: raw.migrations,
+            database,
+            postgres_database_url,
+        })
+    }
+}
+
+#[derive(Serialize)]
+struct ConfigOut<'a> {
+    dialect: Dialect,
+    schema: &'a Option<PathBuf>,
+    migrations: &'a Option<PathBuf>,
+    database_url: Option<String>,
+}
+
+#[derive(Serialize)]
+struct DocumentOut<'a> {
+    fledgling: ConfigOut<'a>,
 }
 
 impl Config {
@@ -125,6 +154,7 @@ impl Config {
             schema: schema.or_else(|| Some(DEFAULT_SCHEMA_PATH.into())),
             migrations: migrations.or_else(|| Some(DEFAULT_MIGRATIONS_PATH.into())),
             database: database.or_else(|| Some(DEFAULT_SQLITE_PATH.into())),
+            postgres_database_url: None,
         }
     }
 
@@ -143,12 +173,12 @@ impl Config {
             .unwrap_or(Path::new("."));
         let [schema, migrations, database] =
             resolve_paths(base, [config.schema, config.migrations, config.database]);
-
         Ok(Config {
             dialect: config.dialect,
             schema,
             migrations,
             database,
+            postgres_database_url: config.postgres_database_url,
         })
     }
 
@@ -157,12 +187,16 @@ impl Config {
     /// Writes paths as held in the config, without rebasing them against `path`.
     /// Existing files are overwritten; the parent directory must already exist.
     pub fn write(&self, path: &Path) -> Result<(), Box<dyn Error>> {
-        let source = toml::to_string(&Document {
-            fledgling: Config {
+        let source = toml::to_string(&DocumentOut {
+            fledgling: ConfigOut {
                 dialect: self.dialect,
-                schema: self.schema.clone(),
-                migrations: self.migrations.clone(),
-                database: self.database.clone(),
+                schema: &self.schema,
+                migrations: &self.migrations,
+                database_url: self.postgres_database_url.clone().or_else(|| {
+                    self.database
+                        .as_ref()
+                        .map(|p| format!("sqlite://{}", p.display()))
+                }),
             },
         })?;
 
@@ -212,10 +246,7 @@ mod tests {
             ("", "missing field `fledgling`"),
             ("dialect = 'sqlite'", "unknown field `dialect`"),
             ("[fledgling]", "missing field `dialect`"),
-            (
-                "[fledgling]\ndialect = 'postgres'",
-                "unknown variant `postgres`",
-            ),
+            ("[fledgling]\ndialect = 'mysql'", "unknown variant `mysql`"),
             (
                 "[fledgling]\ndialect = 'sqlite'\ndatabase = 'db.sqlite'",
                 "unknown field `database`",
@@ -305,6 +336,25 @@ mod tests {
     }
 
     #[test]
+    fn postgres_urls_are_strings_and_are_never_rebased() {
+        let dir = TempDir::new();
+        let path = dir.0.join(CONFIG_FILENAME);
+        let url = "postgresql://user@127.0.0.1/example";
+        fs::write(
+            &path,
+            format!("[fledgling]\ndialect='postgres'\ndatabase_url='{url}'"),
+        )
+        .unwrap();
+        let config = Config::read(&path).unwrap();
+        assert_eq!(config.postgres_database_url.as_deref(), Some(url));
+        assert!(config.database.is_none());
+        assert_rejected(
+            "[fledgling]\ndialect='sqlite'\ndatabase_url='postgresql://user@localhost/db'",
+            "database_url must be a SQLite URL",
+        );
+    }
+
+    #[test]
     fn writes_project_toml_without_rebasing_paths() {
         let dir = TempDir::new();
         let path = dir.0.join(CONFIG_FILENAME);
@@ -315,6 +365,7 @@ mod tests {
             schema: Some("sql/schema.sql".into()),
             migrations: None,
             database: Some("db/example.db".into()),
+            postgres_database_url: None,
         }
         .write(&path)
         .unwrap();

@@ -4,4 +4,4 @@
 
 [`sqlite/`](sqlite/) preserves the removed SQLite backend. These files are archival references, not compiled.
 
-See [ARCHITECTURE.md](../../ARCHITECTURE.md) for the current design.
+See the [architecture overview](../../README.md#architecture) for the current design.

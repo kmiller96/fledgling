@@ -14,6 +14,7 @@ mod migrations;
 mod planner;
 mod schema;
 
+use backends::postgres::driver::PostgresDriver;
 use backends::sqlite::driver::SqliteDriver;
 use migrations::{Ledger, Migration, MigrationCatalog};
 use serde::{Deserialize, Serialize};
@@ -33,12 +34,15 @@ use std::{
 pub enum Dialect {
     /// SQLite, the only supported backend (`sqlite` in TOML).
     SQLite,
+    /// PostgreSQL (`postgres` in TOML).
+    Postgres,
 }
 
 impl fmt::Display for Dialect {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::SQLite => f.write_str("SQLite"),
+            Self::Postgres => f.write_str("PostgreSQL"),
         }
     }
 }
@@ -50,11 +54,12 @@ impl fmt::Display for Dialect {
 /// Pulls the current schema definition from a live database as SQL.
 ///
 /// Opens an existing database read-only and returns the user schema, excluding
-/// the migration ledger and SQLite-owned objects. This is not a data dump.
+/// the migration ledger and database-internal objects. This is not a data dump.
 /// Unlike [`preview`] and [`generate`], it does not read migration history.
 pub fn pull(dialect: Dialect, database: &Path) -> Result<String, Box<dyn Error>> {
     match dialect {
         Dialect::SQLite => Ok(SqliteDriver::open_read_only(database)?.pull()?),
+        Dialect::Postgres => Ok(PostgresDriver::open_read_only(url(database)?)?.pull()?),
     }
 }
 
@@ -80,6 +85,10 @@ pub fn migrate(
     match dialect {
         Dialect::SQLite => {
             let mut driver = SqliteDriver::open(database)?;
+            driver::migrate(&mut driver, &catalog)
+        }
+        Dialect::Postgres => {
+            let mut driver = PostgresDriver::connect(url(database)?)?;
             driver::migrate(&mut driver, &catalog)
         }
     }
@@ -156,6 +165,11 @@ pub fn rollback(
             let catalog = MigrationCatalog::read(migrations)?;
             driver::rollback(&mut driver, &catalog)
         }
+        Dialect::Postgres => {
+            let mut driver = PostgresDriver::connect(url(database)?)?;
+            let catalog = MigrationCatalog::read(migrations)?;
+            driver::rollback(&mut driver, &catalog)
+        }
     }
 }
 
@@ -175,5 +189,15 @@ pub fn status(dialect: Dialect, database: &Path) -> Result<Vec<u64>, Box<dyn Err
             .into_iter()
             .map(|record| record.id)
             .collect()),
+        Dialect::Postgres => Ok(PostgresDriver::open_read_only(url(database)?)?
+            .list()?
+            .into_iter()
+            .map(|record| record.id)
+            .collect()),
     }
+}
+
+fn url(path: &Path) -> Result<&str, Box<dyn Error>> {
+    path.to_str()
+        .ok_or_else(|| "database URL is not valid UTF-8".into())
 }

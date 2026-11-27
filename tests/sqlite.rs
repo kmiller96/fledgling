@@ -1,6 +1,6 @@
 //! SQLite migration scenarios against the public library API.
 //!
-//! To add a scenario, create a folder under `tests/sqlite/scenarios/` containing:
+//! To add a scenario, create a folder under `tests/scenarios/sqlite/` containing:
 //!
 //! - `target.schema.sql`: the desired schema.
 //! - `current.schema.sql` (optional): the starting schema. Omit it to start empty.
@@ -27,7 +27,7 @@ use std::{
 
 /// Verify the generated SQL and round-trip it against a real database.
 #[dir_test(
-    dir: "$CARGO_MANIFEST_DIR/tests/sqlite/scenarios",
+    dir: "$CARGO_MANIFEST_DIR/tests/scenarios/sqlite",
     glob: "*/expected.up.sql",
 )]
 fn sqlite(fixture: Fixture<&str>) {
@@ -101,7 +101,7 @@ fn sqlite(fixture: Fixture<&str>) {
 }
 
 #[dir_test(
-    dir: "$CARGO_MANIFEST_DIR/tests/sqlite/scenarios",
+    dir: "$CARGO_MANIFEST_DIR/tests/scenarios/sqlite",
     glob: "*/error.txt",
 )]
 fn sqlite_rejected(fixture: Fixture<&str>) {
@@ -134,7 +134,7 @@ fn reads_do_not_create_a_database_or_ledger() {
             .unwrap()
             .is_empty()
     );
-    assert_eq!(status(dialect, &database).unwrap(), []);
+    assert!(status(dialect, &database).unwrap().is_empty());
     assert_eq!(rollback(dialect, &database, &workspace.0).unwrap(), None);
     let db = Connection::open_with_flags(&database, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
     assert!(catalog_rows(&db, "SELECT name FROM main.sqlite_schema").is_empty());

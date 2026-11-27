@@ -21,6 +21,9 @@ Alternatively, install from crates.io:
 cargo install fledgling
 ```
 
+Building from source requires a C toolchain and libclang. On Linux, install
+the OpenSSL development headers as well.
+
 ## Quickstart
 
 You can quickly scaffold all the files you need by running the `init` command:
@@ -53,9 +56,9 @@ fledgling generate  # Writes the migration to `./migrations/` by default
 fledgling migrate
 ```
 
-`generate` is an offline, checked additive-schema workflow: it replays the
-migrations on disk and publishes a new Up/Down pair without connecting to the
-database. Migration IDs start at `1` and increment from the highest ID on
+`generate` is a checked additive-schema workflow: it replays the migrations on
+disk and publishes a new Up/Down pair without connecting to the live database.
+Migration IDs start at `1` and increment from the highest ID on
 disk. The filename stem is the database's numeric ID padded to at least six
 digits: `000001.up.sql` with an optional `000001.down.sql`, then `000002.up.sql`,
 and so on. `fledgling status` displays IDs with the same padding.
@@ -77,7 +80,7 @@ CREATE TABLE books (
 );
 ```
 
-Preview the next migration without connecting to the database or writing files:
+Preview the next migration without connecting to the live database or writing files:
 
 ```bash
 fledgling preview
@@ -93,16 +96,36 @@ ALTER TABLE "books" ADD COLUMN "author" TEXT;
 ALTER TABLE "books" DROP COLUMN "author";
 ```
 
+### PostgreSQL
+
+Configure the database in `fledgling.toml`:
+
+```toml
+[fledgling]
+dialect = "postgres"
+database_url = "postgresql://localhost/my_app"
+migrations = "migrations"
+schema = "schema.sql"
+```
+
+Create the database before running `pull`, `status`, `migrate`, or `rollback`.
+`preview` and `generate` work offline: they model the schema from migration
+history and support additive changes to ordinary tables, indexes, and views.
+Neither command needs a database connection. The planner rejects SQL it cannot
+model; PostgreSQL performs the final validation at apply time.
+`pull` exports supported tables, indexes, views, and sequences as DDL. It isn't
+a full `pg_dump` replacement and doesn't export data or database roles.
+
 ### Concurrent migrations
 
 Run only one `fledgling migrate` or `fledgling rollback` at a time per database.
-SQLite protects each migration transaction, but Fledgling does not coordinate
-overlapping runs. For automated deployments, use a single migration job.
+Each migration is transactional, but do not rely on it to coordinate whole
+runs. For automated deployments, use a single migration job.
 
 ## Architecture
 
-SQLite is the only supported database. `schema::Diff` is a vector of logical
-object changes, not execution order. SQLite lowers those changes into ordered SQL.
+Fledgling supports SQLite and PostgreSQL. `schema::Diff` is a vector of logical
+object changes, not execution order.
 `Change::invert` is a logical helper only; SQLite derives Down SQL from the
 selected DDL.
 
@@ -112,10 +135,10 @@ renders its operations as SQLite DDL, and verifies Up and Down in SQLite.
 Connection-bound execution commits each migration or rollback with its ledger
 update in one transaction.
 
-The Rust API exposes `pull`, `preview`, `generate`, `migrate`, `status`, and
-`rollback`. Pass `Dialect::SQLite` and the paths required by the workflow.
-Backend, schema, migration-file, and ledger types are internal. Applied
-history is checked against the ordered migration IDs, not file contents.
+The Rust API exposes workflows for `pull`, `preview`, `generate`, `migrate`,
+`status`, and `rollback`. Backend schema models, migration-file formats, and
+ledger implementations are internal. Applied history is checked against the
+ordered migration IDs, not file contents.
 
 ## Motivation
 

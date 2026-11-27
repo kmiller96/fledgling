@@ -2,6 +2,7 @@
 
 use crate::{
     Dialect,
+    backends::postgres::planner::PostgresPlanner,
     backends::sqlite::planner::SqlitePlanner,
     migrations::MigrationCatalog,
     schema::{Change, DatabaseObject},
@@ -39,5 +40,6 @@ pub(crate) fn plan_files(
         .map_err(|error| format!("reading {}: {error}", schema.display()))?;
     match dialect {
         Dialect::SQLite => SqlitePlanner::verified_plan(&catalog, &desired),
+        Dialect::Postgres => PostgresPlanner::verified_plan(&catalog, &desired),
     }
 }

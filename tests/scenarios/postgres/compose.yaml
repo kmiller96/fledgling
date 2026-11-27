@@ -1,0 +1,17 @@
+# Disposable PostgreSQL acceptance-test instance.
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: fledgling
+      POSTGRES_PASSWORD: fledgling
+      POSTGRES_DB: fledgling_test
+    ports:
+      - "127.0.0.1:55432:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U fledgling -d fledgling_test"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
