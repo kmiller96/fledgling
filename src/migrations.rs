@@ -72,11 +72,11 @@ pub trait Ledger {
 
     /// Commit a new migration to the ledger.
     ///
-    /// Rejects an ID that is already applied by throwing an [`self::Error`].
+    /// Returns an error if the ID is already applied.
     fn commit(&mut self, id: u64) -> Result<(), Self::Error>;
 
-    /// Reverts the latest commit to the ledger.
+    /// Removes the latest committed ID.
     ///
-    /// Uncommitted an empty ledger results in throwing an [`self::Error`].
+    /// Returns an error if the ledger is empty or `id` is not the latest entry.
     fn uncommit(&mut self, id: u64) -> Result<(), Self::Error>;
 }
