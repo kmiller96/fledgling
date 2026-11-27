@@ -1,7 +1,9 @@
-//! Script to help the user scaffold fledgling.
+//! Interactive project initialization and filesystem scaffolding for the CLI.
 //!
-//! Fledgling requires a few files and folders to be setup to work. Rather than
-//! make documentation to follow, we just script it.
+//! This module prompts for a project directory and dialect, then creates the
+//! configured schema file, migrations directory, and `fledgling.toml`. It
+//! avoids overwriting an existing schema or config and does not create the
+//! database. On success, the wizard prints guidance for the next CLI steps.
 
 use crate::config::{CONFIG_FILENAME, Config};
 use fledgling::Dialect;
@@ -46,7 +48,7 @@ const PROJECT_PATH_PROMPT: &str = "Where would you like to install the project?"
 const DIALECT_PROMPT: &str = "What database are you using?";
 
 /// Prompts the user for choices during the installer.
-pub fn prompt_for_user_choices() -> Result<(String, Config), InquireError> {
+fn prompt_for_user_choices() -> Result<(String, Config), InquireError> {
     let path = Text::new(PROJECT_PATH_PROMPT).with_default(".").prompt()?;
     let dialect = Select::new(DIALECT_PROMPT, vec![Dialect::SQLite]).prompt()?;
 
