@@ -90,8 +90,10 @@ struct DatabaseMigrationsArgs {
 
 /// Main routine.
 fn main() -> ExitCode {
+    // Parse CLI
     let cli = Cli::parse();
 
+    // Handle CLI
     let result = {
         match cli.command {
             Command::Init => scaffold::interactive(&cli.config),
@@ -99,6 +101,7 @@ fn main() -> ExitCode {
         }
     };
 
+    // Handle handler response
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
