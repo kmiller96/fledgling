@@ -104,10 +104,10 @@ overlapping runs. For automated deployments, use a single migration job.
 `schema` models backend-defined objects. `planner::ChangeSet` describes logical
 changes, not execution order. `Change::invert` does not guarantee reversibility.
 Backends will lower changes into ordered `migrations::Operation`s and render
-them as SQL.
+them as commands in their own language.
 
 `migrations` defines the Up/Down file boundary and the independent `Ledger`
-contract. `driver::Driver` executes SQL against the target database without
+contract. `driver::Driver` executes migration commands without
 owning applied history. A database-backed ledger can share a transaction with
 execution; an external ledger needs a separate coordination and recovery policy.
 

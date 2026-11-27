@@ -1,4 +1,4 @@
-//! Database schema inspection and SQL migration workflows.
+//! Database schema inspection and migration workflows.
 //!
 //! Workflows are temporarily unimplemented. The documentation below describes
 //! the public contract to restore.
@@ -39,7 +39,7 @@ impl fmt::Display for Dialect {
 // Pull
 // ----------------------------------------------------------------------------
 
-/// Pulls the current schema definition from a live database as SQL.
+/// Pulls the current schema definition from a live database in the backend's format.
 ///
 /// Opens an existing database read-only and returns the user schema, excluding
 /// the migration ledger and SQLite-owned objects. This is not a data dump.
@@ -59,7 +59,7 @@ pub fn pull(dialect: Dialect, database: &Path) -> Result<String, Box<dyn Error>>
 /// The applied IDs must match the start of the numeric file order. Runs the
 /// remaining Up files in that order and returns the IDs applied by this call.
 ///
-/// Each migration's SQL and ledger entry commit atomically. On failure,
+/// Each migration's commands and ledger entry commit atomically. On failure,
 /// execution stops and earlier commits remain applied. Serialize calls to
 /// `migrate` and [`rollback`] for the same database.
 pub fn migrate(
@@ -79,9 +79,9 @@ pub fn migrate(
 ///
 /// Replays the migration files in a disposable database to establish the
 /// baseline, compares it with the desired schema, then renders and verifies
-/// backend-specific SQL in both directions.
+/// backend-specific commands in both directions.
 ///
-/// Returns the same `(Up, Down)` SQL that [`generate`] would write, or `None`
+/// Returns the same `(Up, Down)` command text that [`generate`] would write, or `None`
 /// if no migration is needed. Does not write migration files or connect to a
 /// live database.
 pub fn preview(
@@ -103,7 +103,7 @@ pub fn preview(
 /// Up files, translates the schema diff into backend-specific operations, and
 /// verifies that Up reaches the desired schema and Down restores the baseline.
 ///
-/// Writes both SQL files to the existing `migrations` directory without
+/// Writes both migration files to the existing `migrations` directory without
 /// replacing existing files. The next ID is one greater than the highest ID
 /// on disk, or `1` for an empty history. Returns the Up file's path, or `None`
 /// without writing anything if no migration is needed. Serialize generation
@@ -123,7 +123,7 @@ pub fn generate(
 
 /// Reverts the latest applied migration and returns its ID.
 ///
-/// Requires the migration's Down SQL and executes it atomically with removing
+/// Requires the migration's Down commands and executes them atomically with removing
 /// the migration from the database ledger. Returns `None` if no migrations
 /// are applied. Reverting a schema change does not guarantee restoration of
 /// deleted data. Serialize calls to `rollback` and [`migrate`] for the same
