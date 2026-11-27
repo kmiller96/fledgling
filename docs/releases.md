@@ -11,7 +11,11 @@ selected, and choose `patch`, `minor`, or `major`. The workflow updates
 `vX.Y.Z` tag, then publishes the crate to crates.io. It also builds Linux
 x86_64, macOS Intel and Apple Silicon, and Windows x86_64 binaries, attaching
 archives to a GitHub Release for the new tag. The release runs the same checks
-as CI. GitHub does not start another push workflow for the automation's commit.
+as CI. The GitHub Release is created before the platform builds start; each
+successful build attaches its archive directly, so a slow or stuck runner
+doesn't block the release or the other platforms. A runner that never finishes
+may leave its archive missing. GitHub does not start another push workflow for
+the automation's commit.
 
 To rebuild binaries for the current latest published GitHub Release without
 creating a release, open **Actions → Build latest release → Run workflow**.
