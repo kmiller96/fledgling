@@ -1,13 +1,15 @@
 //! Database schema inspection and migration workflows.
 //!
-//! Workflows are temporarily unimplemented. The documentation below describes
-//! the public contract to restore.
+//! Migration workflows are temporarily unimplemented. Their documentation
+//! describes the public contract to restore.
 
+pub mod backends;
 pub mod driver;
 pub mod migrations;
 pub mod planner;
 pub mod schema;
 
+use backends::sqlite::driver::{OpenMode, SqliteDriver};
 use serde::{Deserialize, Serialize};
 use std::{
     error::Error,
@@ -45,8 +47,13 @@ impl fmt::Display for Dialect {
 /// the migration ledger and SQLite-owned objects. This is not a data dump.
 /// Unlike [`preview`] and [`generate`], it does not read migration history.
 pub fn pull(dialect: Dialect, database: &Path) -> Result<String, Box<dyn Error>> {
-    let _ = (dialect, database);
-    Err(not_implemented("pull"))
+    match dialect {
+        Dialect::SQLite => Ok(SqliteDriver::open(database, OpenMode::Read)?
+            .schema_sql()?
+            .into_iter()
+            .map(|sql| format!("{sql};\n"))
+            .collect()),
+    }
 }
 
 // ----------------------------------------------------------------------------
@@ -147,8 +154,13 @@ pub fn rollback(
 /// returns an empty list without creating it. Does not inspect migration files
 /// or report pending migrations.
 pub fn status(dialect: Dialect, database: &Path) -> Result<Vec<u64>, Box<dyn Error>> {
-    let _ = (dialect, database);
-    Err(not_implemented("status"))
+    use migrations::Ledger;
+
+    match dialect {
+        Dialect::SQLite => Ok(SqliteDriver::open(database, OpenMode::Read)?
+            .ledger()
+            .list()?),
+    }
 }
 
 // ----------------------------------------------------------------------------

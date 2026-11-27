@@ -8,8 +8,6 @@
 use std::error::Error;
 
 /// A connected backend that executes migration commands in its own language.
-///
-/// No drivers are implemented yet.
 pub trait Driver {
     type Error: Error;
 

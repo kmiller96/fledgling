@@ -40,6 +40,10 @@ CREATE TABLE books (
 );
 ```
 
+### Planned migration workflow
+
+The commands below are not yet wired up on this branch.
+
 Fledgling compares your target schema with the schema from your migration
 history, not your live database.
 
@@ -111,9 +115,10 @@ contract. `driver::Driver` executes migration commands without
 owning applied history. A database-backed ledger can share a transaction with
 execution; an external ledger needs a separate coordination and recovery policy.
 
-The workflows described above are temporarily unimplemented. SQLite is the
-only declared dialect; file persistence, concrete drivers, ledger storage, and
-workflow coordination are not wired up yet.
+SQLite implements schema inspection, DDL rendering and execution, and ledger
+storage. The library's `pull` and `status` functions are wired up. Migration
+file persistence, planning, workflow coordination, and CLI commands other than
+`init` are not wired up yet.
 
 ## Motivation
 

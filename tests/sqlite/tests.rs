@@ -90,7 +90,7 @@ fn sqlite(fixture: Fixture<&str>) {
     assert!(migrate(dialect, &database, migrations).unwrap().is_empty());
 
     let pulled = pull(dialect, &database).unwrap();
-    assert!(!pulled.contains("_fledgling_migrations"));
+    assert!(!pulled.contains("__migrations"));
     assert_schema(&reference(&pulled), &target, "pull");
 
     assert_eq!(rollback(dialect, &database, migrations).unwrap(), Some(id));
@@ -324,14 +324,14 @@ fn assert_schema(actual: &Connection, expected: &Connection, phase: &str) {
             "objects",
             "SELECT type, name, tbl_name, CASE WHEN type = 'table' THEN NULL ELSE rtrim(sql, char(10) || char(13) || ' ') END
                FROM main.sqlite_schema
-              WHERE name <> '_fledgling_migrations' AND sql IS NOT NULL
+              WHERE name <> '__migrations' AND sql IS NOT NULL
               ORDER BY type, name",
         ),
         (
             "table columns",
             "SELECT s.name, p.cid, p.name, p.type, p.\"notnull\", p.dflt_value, p.pk, p.hidden
                FROM main.sqlite_schema AS s JOIN pragma_table_xinfo(s.name, 'main') AS p
-              WHERE s.type = 'table' AND s.name <> '_fledgling_migrations'
+              WHERE s.type = 'table' AND s.name <> '__migrations'
               ORDER BY s.name, p.cid",
         ),
     ] {
