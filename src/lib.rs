@@ -3,6 +3,8 @@
 //! Workflows are temporarily unimplemented. The documentation below describes
 //! the public contract to restore.
 
+pub mod driver;
+pub mod migrations;
 pub mod planner;
 pub mod schema;
 
