@@ -3,6 +3,9 @@
 //! Workflows are temporarily unimplemented. The documentation below describes
 //! the public contract to restore.
 
+pub mod planner;
+pub mod schema;
+
 use serde::{Deserialize, Serialize};
 use std::{
     error::Error,
