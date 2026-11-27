@@ -1,6 +1,6 @@
 [package]
 name = "fledgling"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 description = "An early-stage CLI for managing database schemas as code."
 license = "MIT"
