@@ -3,7 +3,7 @@
 use crate::schema::Object;
 use sqlite3_parser::{
     Bump, FallibleIterator,
-    ast::{Cmd, QualifiedName, Stmt},
+    ast::{Cmd, CreateTableBody, QualifiedName, Stmt},
     lexer::sql::Parser,
 };
 
@@ -77,15 +77,15 @@ impl SqliteObject {
         }
         let bump = Bump::new();
         let mut parser = Parser::new(&bump, sql.as_bytes());
-        let (kind, qualified) = parser
+        let command = parser
             .next()
             .map_err(|e| ObjectError(e.to_string()))?
-            .and_then(SqliteObjectKind::from_create)
-            .ok_or_else(|| {
-                ObjectError(
-                    "expected CREATE TABLE, VIRTUAL TABLE, INDEX, VIEW, or TRIGGER in main".into(),
-                )
-            })?;
+            .and_then(SqliteObjectKind::from_create);
+        let (kind, qualified) = command.ok_or_else(|| {
+            ObjectError(
+                "expected CREATE TABLE, VIRTUAL TABLE, INDEX, VIEW, or TRIGGER in main".into(),
+            )
+        })?;
         if parser
             .next()
             .map_err(|e| ObjectError(e.to_string()))?
@@ -93,23 +93,9 @@ impl SqliteObject {
         {
             return Err(ObjectError("expected exactly one CREATE statement".into()));
         }
-        if qualified
-            .db_name
-            .is_some_and(|schema| !unquote(schema.0).eq_ignore_ascii_case("main"))
-        {
-            return Err(ObjectError(
-                "only the main SQLite schema is supported".into(),
-            ));
-        }
-        let name = unquote(qualified.name.0);
-        if name.eq_ignore_ascii_case(LEDGER_NAME)
-            || name.to_ascii_lowercase().starts_with("sqlite_")
-        {
-            return Err(ObjectError(format!("reserved SQLite object name: {name}")));
-        }
         Ok(Self {
             kind,
-            name,
+            name: main_name(qualified)?,
             sql: sql.to_owned(),
         })
     }
@@ -130,6 +116,50 @@ impl SqliteObject {
     }
 }
 
+fn main_name(qualified: QualifiedName<'_>) -> Result<String, ObjectError> {
+    if qualified
+        .db_name
+        .is_some_and(|schema| !unquote(schema.0).eq_ignore_ascii_case("main"))
+    {
+        return Err(ObjectError(
+            "only the main SQLite schema is supported".into(),
+        ));
+    }
+    let name = unquote(qualified.name.0);
+    if name.eq_ignore_ascii_case(LEDGER_NAME) || name.to_ascii_lowercase().starts_with("sqlite_") {
+        return Err(ObjectError(format!("reserved SQLite object name: {name}")));
+    }
+    Ok(name)
+}
+
+pub(super) fn validate_desired_sql(sql: &str) -> Result<(), ObjectError> {
+    if sql.contains('\0') {
+        return Err(ObjectError("SQL contains a NUL byte".into()));
+    }
+    let bump = Bump::new();
+    let mut parser = Parser::new(&bump, sql.as_bytes());
+    let mut seen = std::collections::HashSet::new();
+    while let Some(command) = parser.next().map_err(|e| ObjectError(e.to_string()))? {
+        let declaration = match command {
+            Cmd::Stmt(Stmt::CreateTable {
+                body: CreateTableBody::AsSelect(_),
+                ..
+            }) => None,
+            command => SqliteObjectKind::from_create(command),
+        };
+        let (kind, qualified) = declaration.ok_or_else(|| {
+            ObjectError("desired schema must contain only persistent CREATE declarations".into())
+        })?;
+        let name = main_name(qualified)?;
+        if !seen.insert((name.to_ascii_lowercase(), kind == SqliteObjectKind::Trigger)) {
+            return Err(ObjectError(format!(
+                "duplicate object in desired schema: {name}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 impl Object for SqliteObject {
     type Id = SqliteObjectId;
 
@@ -145,7 +175,7 @@ impl Object for SqliteObject {
 // Identifier handling
 // ----------------------------------------------------------------------------
 
-fn unquote(name: &str) -> String {
+pub(super) fn unquote(name: &str) -> String {
     for (quote, escaped) in [('"', "\"\""), ('`', "``"), ('\'', "''")] {
         if let Some(inner) = name.strip_prefix(quote).and_then(|s| s.strip_suffix(quote)) {
             return inner.replace(escaped, &quote.to_string());

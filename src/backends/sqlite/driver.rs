@@ -26,6 +26,8 @@ pub enum OpenMode {
     Read,
     /// Open for reading and writing, creating the database if needed.
     Write,
+    /// Open an existing database for reading and writing.
+    WriteExisting,
 }
 
 /// A connected SQLite driver. Executing commands never updates applied history.
@@ -42,6 +44,7 @@ impl SqliteDriver {
         let flags = match mode {
             OpenMode::Read => OpenFlags::SQLITE_OPEN_READ_ONLY,
             OpenMode::Write => OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
+            OpenMode::WriteExisting => OpenFlags::SQLITE_OPEN_READ_WRITE,
         };
         Self::new(Connection::open_with_flags(path, flags)?)
     }
@@ -88,6 +91,23 @@ impl SqliteDriver {
             .map(|sql| SqliteObject::from_sql(sql).map_err(|e| SqliteError::Invalid(e.to_string())))
             .collect::<Result<Vec<_>, _>>()
             .map(Schema::new)
+    }
+
+    pub(super) fn validate_views(&self, schema: &Schema<SqliteObject>) -> Result<(), SqliteError> {
+        use super::{objects::SqliteObjectKind, operations::quote};
+
+        // CREATE VIEW succeeds even when its query cannot resolve.
+        for view in schema
+            .objects()
+            .iter()
+            .filter(|o| o.kind() == SqliteObjectKind::View)
+        {
+            self.connection.prepare(&format!(
+                "SELECT * FROM main.{} LIMIT 0",
+                quote(view.name())
+            ))?;
+        }
+        Ok(())
     }
 
     /// Start a transaction for a caller coordinating commands and history.

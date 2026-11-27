@@ -6,7 +6,13 @@
 //! [`crate::driver::Driver`]. A [`Ledger`] tracks applied IDs independently of
 //! command execution.
 
-use std::error::Error;
+use std::{
+    error::Error,
+    fs::{self, File},
+    io::{self, Write},
+    path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 // ----------------------------------------------------------------------------
 // Operation
@@ -50,6 +56,107 @@ pub struct VersionedMigration {
     pub id: u64,
     /// Commands to apply or revert this migration.
     pub migration: Migration,
+}
+
+// ----------------------------------------------------------------------------
+// Migration files
+// ----------------------------------------------------------------------------
+// This section was AI-generated and requires human review.
+
+/// An on-disk migration identified by its Up file, without loading its SQL.
+pub(crate) struct MigrationFile {
+    /// Positive numeric ID parsed from the Up filename.
+    pub id: u64,
+    /// Path to the Up SQL file.
+    pub up: PathBuf,
+    /// Path to the matching Down SQL file, whether or not it exists.
+    pub down: PathBuf,
+}
+
+impl MigrationFile {
+    /// Finds `*.up.sql` entries in numeric ID order.
+    ///
+    /// Rejects invalid IDs and duplicate numeric IDs, including differently
+    /// padded filenames for the same ID. Does not read file contents or
+    /// require matching Down files.
+    pub fn list(directory: &Path) -> io::Result<Vec<Self>> {
+        let mut files = Vec::new();
+        for entry in fs::read_dir(directory)? {
+            if let Some(file) = Self::from_path(entry?.path())? {
+                files.push(file);
+            }
+        }
+        files.sort_by_key(|file| file.id);
+        if let Some(pair) = files.windows(2).find(|pair| pair[0].id == pair[1].id) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("duplicate migration ID {:06}", pair[0].id),
+            ));
+        }
+        Ok(files)
+    }
+
+    /// Ignores unrelated names and rejects malformed Up filenames.
+    fn from_path(up: PathBuf) -> io::Result<Option<Self>> {
+        let Some(stem) = up
+            .file_name()
+            .and_then(|name| name.as_encoded_bytes().strip_suffix(b".up.sql"))
+        else {
+            return Ok(None);
+        };
+
+        // Check the bytes so non-UTF-8 names and signs aren't accepted as IDs.
+        if let Ok(stem) = str::from_utf8(stem)
+            && stem.bytes().all(|byte| byte.is_ascii_digit())
+            && let Ok(id @ 1..) = stem.parse::<u64>()
+        {
+            let down = up.with_file_name(format!("{stem}.down.sql"));
+            return Ok(Some(Self { id, up, down }));
+        }
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{}: expected a positive numeric migration ID", up.display()),
+        ))
+    }
+
+    /// Writes a new Up/Down pair and returns the Up path.
+    ///
+    /// Uses six-digit minimum padding and never overwrites an existing file.
+    /// Publishes only complete files, Down first, so discovery cannot find an
+    /// Up file before its partner exists. If publishing Up fails, attempts to
+    /// remove the new Down file. An interruption can still leave a Down file behind.
+    pub fn publish(directory: &Path, id: u64, up: &str, down: &str) -> io::Result<PathBuf> {
+        let up_path = directory.join(format!("{id:06}.up.sql"));
+        let down_path = directory.join(format!("{id:06}.down.sql"));
+        Self::publish_sql(directory, &down_path, down)?;
+        if let Err(error) = Self::publish_sql(directory, &up_path, up) {
+            let _ = fs::remove_file(&down_path);
+            return Err(error);
+        }
+        Ok(up_path)
+    }
+    /// Stages SQL next to its destination, then links it without replacing it.
+    fn publish_sql(directory: &Path, path: &Path, sql: &str) -> io::Result<()> {
+        static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
+
+        let contextualize =
+            |error: io::Error| io::Error::new(error.kind(), format!("{}: {error}", path.display()));
+        let (temp, mut file) = loop {
+            let id = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
+            let temp = directory.join(format!(".fledgling-{}-{id}.tmp", std::process::id()));
+            match File::create_new(&temp) {
+                Ok(file) => break (temp, file),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(contextualize(error)),
+            }
+        };
+
+        let written = file.write_all(sql.as_bytes());
+        drop(file);
+        let published = written.and_then(|()| fs::hard_link(&temp, path));
+        let _ = fs::remove_file(temp);
+        published.map_err(contextualize)
+    }
 }
 
 // ----------------------------------------------------------------------------
