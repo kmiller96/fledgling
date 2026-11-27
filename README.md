@@ -8,7 +8,7 @@ migrations.
 macOS and Linux:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/kmiller96/fledgling/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/kmiller96/fledgling/master/install.sh | bash
 ```
 
 The installer places `fledgling` in `~/.local/bin`. Set `FLEDGLING_INSTALL_DIR`
