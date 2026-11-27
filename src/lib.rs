@@ -1,21 +1,8 @@
 //! Database schema inspection and SQL migration workflows.
 //!
-//! A project keeps its desired schema in SQL and its history in versioned
-//! Up and Down files. [`preview`] and [`generate`] work offline: they compare
-//! the desired schema with the schema obtained by replaying those files, not
-//! with a live database. [`pull`] inspects a live database instead.
-//!
-//! [`migrate`] and [`rollback`] commit each migration and its ledger update
-//! together. Callers must still serialize those workflows per database.
+//! Workflows are temporarily unimplemented. The documentation below describes
+//! the public contract to restore.
 
-mod backends;
-mod driver;
-mod migrations;
-mod planner;
-mod schema;
-
-use backends::sqlite::driver::SqliteDriver;
-use migrations::{Ledger, Migration, MigrationCatalog};
 use serde::{Deserialize, Serialize};
 use std::{
     error::Error,
@@ -53,9 +40,8 @@ impl fmt::Display for Dialect {
 /// the migration ledger and SQLite-owned objects. This is not a data dump.
 /// Unlike [`preview`] and [`generate`], it does not read migration history.
 pub fn pull(dialect: Dialect, database: &Path) -> Result<String, Box<dyn Error>> {
-    match dialect {
-        Dialect::SQLite => Ok(SqliteDriver::open_read_only(database)?.pull()?),
-    }
+    let _ = (dialect, database);
+    Err(not_implemented("pull"))
 }
 
 // ----------------------------------------------------------------------------
@@ -76,13 +62,8 @@ pub fn migrate(
     database: &Path,
     migrations: &Path,
 ) -> Result<Vec<u64>, Box<dyn Error>> {
-    let catalog = MigrationCatalog::read(migrations)?;
-    match dialect {
-        Dialect::SQLite => {
-            let mut driver = SqliteDriver::open(database)?;
-            driver::migrate(&mut driver, &catalog)
-        }
-    }
+    let _ = (dialect, database, migrations);
+    Err(not_implemented("migrate"))
 }
 
 // ----------------------------------------------------------------------------
@@ -103,7 +84,8 @@ pub fn preview(
     migrations: &Path,
     schema: &Path,
 ) -> Result<Option<(String, String)>, Box<dyn Error>> {
-    Ok(planner::plan_files(dialect, migrations, schema)?.map(|(_, plan)| (plan.up, plan.down)))
+    let _ = (dialect, migrations, schema);
+    Err(not_implemented("preview"))
 }
 
 // ----------------------------------------------------------------------------
@@ -126,12 +108,8 @@ pub fn generate(
     migrations: &Path,
     schema: &Path,
 ) -> Result<Option<PathBuf>, Box<dyn Error>> {
-    let Some((id, plan)) = planner::plan_files(dialect, migrations, schema)? else {
-        return Ok(None);
-    };
-    Ok(Some(
-        Migration::new(id, migrations, plan.up, plan.down).write()?,
-    ))
+    let _ = (dialect, migrations, schema);
+    Err(not_implemented("generate"))
 }
 
 // ----------------------------------------------------------------------------
@@ -150,13 +128,8 @@ pub fn rollback(
     database: &Path,
     migrations: &Path,
 ) -> Result<Option<u64>, Box<dyn Error>> {
-    match dialect {
-        Dialect::SQLite => {
-            let mut driver = SqliteDriver::open_existing(database)?;
-            let catalog = MigrationCatalog::read(migrations)?;
-            driver::rollback(&mut driver, &catalog)
-        }
-    }
+    let _ = (dialect, database, migrations);
+    Err(not_implemented("rollback"))
 }
 
 // ----------------------------------------------------------------------------
@@ -169,11 +142,10 @@ pub fn rollback(
 /// returns an empty list without creating it. Does not inspect migration files
 /// or report pending migrations.
 pub fn status(dialect: Dialect, database: &Path) -> Result<Vec<u64>, Box<dyn Error>> {
-    match dialect {
-        Dialect::SQLite => Ok(SqliteDriver::open_read_only(database)?
-            .list()?
-            .into_iter()
-            .map(|record| record.id)
-            .collect()),
-    }
+    let _ = (dialect, database);
+    Err(not_implemented("status"))
+}
+
+fn not_implemented(operation: &str) -> Box<dyn Error> {
+    format!("{operation} is not implemented").into()
 }
