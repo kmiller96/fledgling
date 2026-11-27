@@ -88,8 +88,22 @@ struct DatabaseMigrationsArgs {
 // Main Handler
 // ----------------------------------------------------------------------------
 
+/// Main routine.
 fn main() -> ExitCode {
-    Cli::parse();
-    eprintln!("Error: commands are not implemented");
-    ExitCode::FAILURE
+    let cli = Cli::parse();
+
+    let result = {
+        match cli.command {
+            Command::Init => scaffold::interactive(&cli.config),
+            _ => Err("commands are not implemented".into()),
+        }
+    };
+
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("Error: {error}");
+            ExitCode::FAILURE
+        }
+    }
 }
