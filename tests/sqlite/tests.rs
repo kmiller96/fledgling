@@ -214,7 +214,8 @@ fn generation_refuses_to_replace_existing_files() {
     let down = migrations.join("000001.down.sql");
     fs::write(&schema, "CREATE TABLE books (id);").unwrap();
     fs::write(&down, "keep this file").unwrap();
-    assert!(generate(Dialect::SQLite, migrations, &schema).is_err());
+    let error = generate(Dialect::SQLite, migrations, &schema).unwrap_err();
+    assert!(error.to_string().contains("000001.down.sql"), "{error}");
     assert_eq!(read(&down), "keep this file");
     assert!(!migrations.join("000001.up.sql").exists());
 }
@@ -256,16 +257,23 @@ fn rejects_executable_sql_and_unresolved_views_in_the_desired_schema() {
     let workspace = Workspace::new();
     let migrations = &workspace.0;
     let schema = migrations.join("schema.sql");
-    for sql in [
-        "CREATE TABLE books (id); INSERT INTO books VALUES (1);",
-        "CREATE VIEW books AS SELECT * FROM missing;",
-        "CREATE TABLE books (id); CREATE TABLE IF NOT EXISTS BOOKS (other);",
+    for (sql, expected) in [
+        (
+            "CREATE TABLE books (id); INSERT INTO books VALUES (1);",
+            "only persistent CREATE declarations",
+        ),
+        (
+            "CREATE VIEW books AS SELECT * FROM missing;",
+            "no such table: main.missing",
+        ),
+        (
+            "CREATE TABLE books (id); CREATE TABLE IF NOT EXISTS BOOKS (other);",
+            "duplicate object in desired schema",
+        ),
     ] {
         fs::write(&schema, sql).unwrap();
-        assert!(
-            generate(Dialect::SQLite, migrations, &schema).is_err(),
-            "{sql}"
-        );
+        let error = generate(Dialect::SQLite, migrations, &schema).unwrap_err();
+        assert!(error.to_string().contains(expected), "{sql}: {error}");
     }
     assert!(!migrations.join("000001.up.sql").exists());
 }
