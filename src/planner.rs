@@ -66,6 +66,11 @@ impl<'a, O: Object> ChangeSet<'a, O> {
         &self.changes
     }
 
+    /// Moves the changes vector to the caller.
+    pub(crate) fn into_changes(self) -> Vec<Change<'a, O>> {
+        self.changes
+    }
+
     /// Invert every change and reverse their order.
     ///
     /// This does not guarantee that a backend can undo the changes.
