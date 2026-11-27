@@ -146,6 +146,10 @@ pub fn status(dialect: Dialect, database: &Path) -> Result<Vec<u64>, Box<dyn Err
     Err(not_implemented("status"))
 }
 
+// ----------------------------------------------------------------------------
+// Utils
+// ----------------------------------------------------------------------------
+
 fn not_implemented(operation: &str) -> Box<dyn Error> {
     format!("{operation} is not implemented").into()
 }
