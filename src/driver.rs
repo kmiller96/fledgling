@@ -1,7 +1,7 @@
 //! Execution boundary for Up or Down migration commands.
 //!
-//! A future workflow will select migrations, coordinate history updates with
-//! execution, and handle failures. A driver does not implement or own a ledger.
+//! The workflow selects migrations and coordinates history updates with
+//! execution. A driver does not implement or own a ledger.
 //! A shared transaction is possible when both use the same database transaction;
 //! external stores need a separate coordination and recovery policy.
 

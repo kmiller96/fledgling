@@ -74,6 +74,36 @@ pub(crate) struct MigrationFile {
 }
 
 impl MigrationFile {
+    /// Check that the applied IDs match the start of the on-disk history.
+    pub fn applied_prefix(files: &[Self], applied: &[u64]) -> io::Result<usize> {
+        for (index, &id) in applied.iter().enumerate() {
+            if files.get(index).map(|file| file.id) != Some(id) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "applied migration {id:06} does not match the migration files at position {}",
+                        index + 1
+                    ),
+                ));
+            }
+        }
+        Ok(applied.len())
+    }
+
+    /// Load Down SQL, with a specific error when the migration has no Down file.
+    pub fn read_down(&self) -> io::Result<String> {
+        read_sql(&self.down).map_err(|error| {
+            if error.kind() == io::ErrorKind::NotFound {
+                io::Error::new(
+                    error.kind(),
+                    format!("migration {:06} has no Down SQL: {error}", self.id),
+                )
+            } else {
+                error
+            }
+        })
+    }
+
     /// Finds `*.up.sql` entries in numeric ID order.
     ///
     /// Rejects invalid IDs and duplicate numeric IDs, including differently
@@ -119,13 +149,23 @@ impl MigrationFile {
         ))
     }
 
-    /// Writes a new Up/Down pair and returns the Up path.
+    /// Writes an Up/Down pair at the next numeric ID and returns the Up path.
     ///
-    /// Uses six-digit minimum padding and never overwrites an existing file.
-    /// Publishes only complete files, Down first, so discovery cannot find an
-    /// Up file before its partner exists. If publishing Up fails, attempts to
+    /// Expects sorted file history. Uses six-digit minimum padding and never
+    /// overwrites an existing file. Publishes Down first, so discovery cannot
+    /// see Up before its partner exists. If publishing Up fails, attempts to
     /// remove the new Down file. An interruption can still leave a Down file behind.
-    pub fn publish(directory: &Path, id: u64, up: &str, down: &str) -> io::Result<PathBuf> {
+    pub fn publish_next(
+        directory: &Path,
+        files: &[Self],
+        up: &str,
+        down: &str,
+    ) -> io::Result<PathBuf> {
+        let id = files
+            .last()
+            .map_or(0, |file| file.id)
+            .checked_add(1)
+            .ok_or_else(|| io::Error::other("no migration IDs remain"))?;
         let up_path = directory.join(format!("{id:06}.up.sql"));
         let down_path = directory.join(format!("{id:06}.down.sql"));
         Self::publish_sql(directory, &down_path, down)?;
@@ -157,6 +197,11 @@ impl MigrationFile {
         let _ = fs::remove_file(temp);
         published.map_err(contextualize)
     }
+}
+
+pub(crate) fn read_sql(path: &Path) -> io::Result<String> {
+    fs::read_to_string(path)
+        .map_err(|error| io::Error::new(error.kind(), format!("{}: {error}", path.display())))
 }
 
 // ----------------------------------------------------------------------------

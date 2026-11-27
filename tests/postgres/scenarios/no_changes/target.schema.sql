@@ -1,0 +1,1 @@
+CREATE TABLE books (id int8 PRIMARY KEY);

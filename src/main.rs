@@ -53,7 +53,7 @@ enum Command {
 
 #[derive(Args)]
 struct DatabaseArgs {
-    /// Override the configured database.
+    /// Override the SQLite path or PostgreSQL URL.
     #[arg(long, conflicts_with = "database_pos")]
     database: Option<PathBuf>,
     #[arg(value_name = "DATABASE")]

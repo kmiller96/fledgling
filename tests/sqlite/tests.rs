@@ -134,7 +134,7 @@ fn reads_do_not_create_a_database_or_ledger() {
             .unwrap()
             .is_empty()
     );
-    assert_eq!(status(dialect, &database).unwrap(), []);
+    assert!(status(dialect, &database).unwrap().is_empty());
     assert_eq!(rollback(dialect, &database, &workspace.0).unwrap(), None);
     let db = Connection::open_with_flags(&database, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
     assert!(catalog_rows(&db, "SELECT name FROM main.sqlite_schema").is_empty());
