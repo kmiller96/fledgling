@@ -10,8 +10,9 @@ selected, and choose `patch`, `minor`, or `major`. The workflow updates
 `Cargo.toml` and `Cargo.lock`, validates the release commit, pushes it with its
 `vX.Y.Z` tag, then publishes the crate to crates.io. It also builds Linux
 x86_64, macOS Intel and Apple Silicon, and Windows x86_64 binaries, attaching
-archives to a GitHub Release for the new tag. The release runs the same checks
-as CI. The GitHub Release is created before the platform builds start; each
+archives to a GitHub Release for the new tag. The release runs the standard
+crate checks; CI also runs integration tests against PostgreSQL 17. The GitHub
+Release is created before the platform builds start; each
 successful build attaches its archive directly, so a slow or stuck runner
 doesn't block publishing, the other platforms, or the next release run. A
 runner that never finishes may leave its archive missing. GitHub does not start

@@ -7,6 +7,7 @@ pub mod driver;
 pub mod ledger;
 pub mod objects;
 pub mod operations;
-pub(crate) mod planner;
+mod planner;
+pub(crate) mod workflow;
 
 pub use super::errors::SqliteError;

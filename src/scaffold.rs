@@ -33,7 +33,7 @@ Next steps (from the project directory):
 
    \x1b[1;36mfledgling generate\x1b[0m
 
-3. Apply the migration (creates the SQLite database if needed):
+3. Apply the migration (create the database first if using PostgreSQL):
 
    \x1b[1;36mfledgling migrate\x1b[0m";
 
@@ -50,7 +50,7 @@ const DIALECT_PROMPT: &str = "What database are you using?";
 /// Prompts the user for choices during the installer.
 fn prompt_for_user_choices() -> Result<(String, Config), InquireError> {
     let path = Text::new(PROJECT_PATH_PROMPT).with_default(".").prompt()?;
-    let dialect = Select::new(DIALECT_PROMPT, vec![Dialect::SQLite]).prompt()?;
+    let dialect = Select::new(DIALECT_PROMPT, vec![Dialect::SQLite, Dialect::Postgres]).prompt()?;
 
     Ok((path, Config::new(dialect, None, None, None)))
 }

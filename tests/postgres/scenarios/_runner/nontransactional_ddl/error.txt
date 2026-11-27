@@ -1,0 +1,2 @@
+000002.up.sql
+CREATE INDEX CONCURRENTLY cannot run inside a transaction block

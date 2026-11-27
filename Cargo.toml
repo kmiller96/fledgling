@@ -10,6 +10,10 @@ exclude = ["/.github"]
 [dependencies]
 clap = { version = "4.6.9", features = ["derive"] }
 inquire = { version = "0.9.5", default-features = false, features = ["crossterm"] }
+native-tls = "0.2"
+pg_query = "6.2"
+postgres = "0.19"
+postgres-native-tls = "0.5"
 rusqlite = { version = "0.40.0", features = ["bundled", "hooks"] }
 serde = { version = "1", features = ["derive"] }
 sqlite3-parser = "0.17.0"
@@ -17,6 +21,10 @@ toml = { version = "1", default-features = false, features = ["display", "parse"
 
 [dev-dependencies]
 dir-test = "0.4"
+
+[[test]]
+name = "postgres"
+path = "tests/postgres/tests.rs"
 
 [[test]]
 name = "sqlite"

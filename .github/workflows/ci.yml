@@ -13,11 +13,26 @@ jobs:
     name: Validate crate
     if: github.event_name == 'pull_request' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: test
+        ports:
+          - 5432/tcp
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
       - run: bash .github/scripts/check.sh
+      - run: cargo test --locked --test postgres -- --ignored
+        env:
+          FLEDGLING_TEST_POSTGRES_URL: postgresql://postgres:test@localhost:${{ job.services.postgres.ports[5432] }}/postgres
 
   build-commit:
     if: github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)

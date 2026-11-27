@@ -1,0 +1,2 @@
+000002.up.sql
+relation "missing_acceptance_table" does not exist

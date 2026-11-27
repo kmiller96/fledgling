@@ -6,16 +6,11 @@ pub mod migrations;
 pub mod planner;
 pub mod schema;
 
-use backends::sqlite::{
-    driver::{OpenMode, SqliteDriver},
-    planner::verified_plan,
-};
-use driver::Driver;
-use migrations::{Ledger, MigrationFile};
+use backends::{postgres, sqlite};
 use serde::{Deserialize, Serialize};
 use std::{
     error::Error,
-    fmt, fs, io,
+    fmt,
     path::{Path, PathBuf},
 };
 
@@ -27,14 +22,17 @@ use std::{
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Dialect {
-    /// SQLite, the only supported backend (`sqlite` in TOML).
+    /// SQLite (`sqlite` in TOML).
     SQLite,
+    /// PostgreSQL (`postgres` in TOML).
+    Postgres,
 }
 
 impl fmt::Display for Dialect {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::SQLite => f.write_str("SQLite"),
+            Self::Postgres => f.write_str("PostgreSQL"),
         }
     }
 }
@@ -45,16 +43,14 @@ impl fmt::Display for Dialect {
 
 /// Pulls the current schema definition from a live database in the backend's format.
 ///
-/// Opens an existing database read-only and returns the user schema, excluding
-/// the migration ledger and SQLite-owned objects. This is not a data dump.
+/// Reads the user schema from an existing database, excluding backend-owned
+/// objects and the migration ledger. This is not a data dump.
 /// Unlike [`preview`] and [`generate`], it does not read migration history.
+/// For PostgreSQL, pass a connection URL in `database`, not a file path.
 pub fn pull(dialect: Dialect, database: &Path) -> Result<String, Box<dyn Error>> {
     match dialect {
-        Dialect::SQLite => Ok(SqliteDriver::open(database, OpenMode::Read)?
-            .schema_sql()?
-            .into_iter()
-            .map(|sql| format!("{sql};\n"))
-            .collect()),
+        Dialect::SQLite => Ok(sqlite::workflow::pull(database)?),
+        Dialect::Postgres => Ok(postgres::workflow::pull(database)?),
     }
 }
 
@@ -76,24 +72,10 @@ pub fn migrate(
     database: &Path,
     migrations: &Path,
 ) -> Result<Vec<u64>, Box<dyn Error>> {
-    let files = MigrationFile::list(migrations)?;
-    let mut driver = match dialect {
-        Dialect::SQLite => SqliteDriver::open(database, OpenMode::Write)?,
-    };
-    let applied = driver.ledger().list()?;
-    let mut ids = Vec::new();
-    for file in &files[applied_prefix(&files, &applied)?..] {
-        let sql = read_sql(&file.up)?;
-        let mut apply = || -> Result<(), backends::sqlite::SqliteError> {
-            let mut transaction = driver.transaction()?;
-            transaction.execute(&sql)?;
-            transaction.ledger()?.commit(file.id)?;
-            transaction.commit()
-        };
-        apply().map_err(|error| format!("applying {}: {error}", file.up.display()))?;
-        ids.push(file.id);
+    match dialect {
+        Dialect::SQLite => sqlite::workflow::migrate(database, migrations),
+        Dialect::Postgres => postgres::workflow::migrate(database, migrations),
     }
-    Ok(ids)
 }
 
 // ----------------------------------------------------------------------------
@@ -102,9 +84,8 @@ pub fn migrate(
 
 /// Previews the migration needed to reach the desired schema.
 ///
-/// Replays the migration files in a disposable database to establish the
-/// baseline, compares it with the desired schema, then renders and verifies
-/// backend-specific commands in both directions.
+/// Replays the migration files in a disposable SQLite database or an offline
+/// PostgreSQL model, then renders and checks commands in both directions.
 ///
 /// Returns the same `(Up, Down)` command text that [`generate`] would write, or `None`
 /// if no migration is needed. Does not write migration files or connect to a
@@ -115,7 +96,8 @@ pub fn preview(
     schema: &Path,
 ) -> Result<Option<(String, String)>, Box<dyn Error>> {
     match dialect {
-        Dialect::SQLite => verified_plan(&MigrationFile::list(migrations)?, schema),
+        Dialect::SQLite => sqlite::workflow::preview(migrations, schema),
+        Dialect::Postgres => postgres::workflow::preview(migrations, schema),
     }
 }
 
@@ -139,19 +121,10 @@ pub fn generate(
     migrations: &Path,
     schema: &Path,
 ) -> Result<Option<PathBuf>, Box<dyn Error>> {
-    let files = MigrationFile::list(migrations)?;
-    let plan = match dialect {
-        Dialect::SQLite => verified_plan(&files, schema)?,
-    };
-    let Some((up, down)) = plan else {
-        return Ok(None);
-    };
-    let id = files
-        .last()
-        .map_or(0, |file| file.id)
-        .checked_add(1)
-        .ok_or("no migration IDs remain")?;
-    Ok(Some(MigrationFile::publish(migrations, id, &up, &down)?))
+    match dialect {
+        Dialect::SQLite => sqlite::workflow::generate(migrations, schema),
+        Dialect::Postgres => postgres::workflow::generate(migrations, schema),
+    }
 }
 
 // ----------------------------------------------------------------------------
@@ -170,33 +143,10 @@ pub fn rollback(
     database: &Path,
     migrations: &Path,
 ) -> Result<Option<u64>, Box<dyn Error>> {
-    let mut driver = match dialect {
-        Dialect::SQLite => SqliteDriver::open(database, OpenMode::WriteExisting)?,
-    };
-    let mut transaction = driver.transaction()?;
-    let applied = transaction.ledger()?.list()?;
-    let Some(&id) = applied.last() else {
-        return Ok(None);
-    };
-    let files = MigrationFile::list(migrations)?;
-    let applied_count = applied_prefix(&files, &applied)?;
-    let path = &files[applied_count - 1].down;
-    let sql = read_sql(path).map_err(|error| {
-        if error.kind() == io::ErrorKind::NotFound {
-            io::Error::new(
-                error.kind(),
-                format!("migration {id:06} has no Down SQL: {error}"),
-            )
-        } else {
-            error
-        }
-    })?;
-    transaction
-        .execute(&sql)
-        .map_err(|error| format!("reverting {}: {error}", path.display()))?;
-    transaction.ledger()?.uncommit(id)?;
-    transaction.commit()?;
-    Ok(Some(id))
+    match dialect {
+        Dialect::SQLite => sqlite::workflow::rollback(database, migrations),
+        Dialect::Postgres => postgres::workflow::rollback(database, migrations),
+    }
 }
 
 // ----------------------------------------------------------------------------
@@ -210,30 +160,7 @@ pub fn rollback(
 /// or report pending migrations.
 pub fn status(dialect: Dialect, database: &Path) -> Result<Vec<u64>, Box<dyn Error>> {
     match dialect {
-        Dialect::SQLite => Ok(SqliteDriver::open(database, OpenMode::Read)?
-            .ledger()
-            .list()?),
+        Dialect::SQLite => Ok(sqlite::workflow::status(database)?),
+        Dialect::Postgres => Ok(postgres::workflow::status(database)?),
     }
-}
-
-// ----------------------------------------------------------------------------
-// Utils
-// ----------------------------------------------------------------------------
-
-fn applied_prefix(files: &[MigrationFile], applied: &[u64]) -> Result<usize, Box<dyn Error>> {
-    for (index, &id) in applied.iter().enumerate() {
-        if files.get(index).map(|file| file.id) != Some(id) {
-            return Err(format!(
-                "applied migration {id:06} does not match the migration files at position {}",
-                index + 1
-            )
-            .into());
-        }
-    }
-    Ok(applied.len())
-}
-
-fn read_sql(path: &Path) -> io::Result<String> {
-    fs::read_to_string(path)
-        .map_err(|error| io::Error::new(error.kind(), format!("{}: {error}", path.display())))
 }

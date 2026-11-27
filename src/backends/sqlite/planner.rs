@@ -18,9 +18,8 @@ use super::{
 };
 use crate::{
     driver::Driver,
-    migrations::MigrationFile,
+    migrations::{MigrationFile, read_sql},
     planner::{Change, diff},
-    read_sql,
     schema::Schema,
 };
 
