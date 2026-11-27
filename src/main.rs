@@ -1,12 +1,12 @@
 //! Fledgling command-line entry point.
 
-mod config;
-mod scaffold;
-
 use clap::{Args, Parser, Subcommand};
 use config::{CONFIG_FILENAME, Config};
 use fledgling::{generate, migrate, preview, pull, rollback, status};
 use std::{error::Error, path::PathBuf, process::ExitCode};
+
+mod config;
+mod scaffold;
 
 // ----------------------------------------------------------------------------
 // CLI Definition
@@ -86,6 +86,30 @@ struct DatabaseMigrationsArgs {
     migrations: MigrationsArgs,
 }
 
+impl DatabaseArgs {
+    fn resolve(self, configured: Option<PathBuf>) -> Result<PathBuf, Box<dyn Error>> {
+        required(
+            self.database.or(self.database_pos).or(configured),
+            "database",
+        )
+    }
+}
+
+impl MigrationsArgs {
+    fn resolve(self, configured: Option<PathBuf>) -> Result<PathBuf, Box<dyn Error>> {
+        required(
+            self.migrations.or(self.migrations_pos).or(configured),
+            "migrations",
+        )
+    }
+}
+
+impl SchemaArgs {
+    fn resolve(self, configured: Option<PathBuf>) -> Result<PathBuf, Box<dyn Error>> {
+        required(self.schema.or(self.schema_pos).or(configured), "schema")
+    }
+}
+
 // ----------------------------------------------------------------------------
 // Main Handler
 // ----------------------------------------------------------------------------
@@ -110,70 +134,49 @@ fn run(Cli { config, command }: Cli) -> Result<(), Box<dyn Error>> {
         migrations,
         schema,
     } = Config::read(&config).map_err(|error| format!("reading {}: {error}", config.display()))?;
-
-    let apply = matches!(&command, Command::Migrate(_));
-    let show_preview = matches!(&command, Command::Preview { .. });
     match command {
         Command::Init => unreachable!(),
         Command::Pull(args) => {
-            let database = required(args.database.or(args.database_pos).or(database), "database")?;
-            print!("{}", pull(dialect, &database)?);
+            print!("{}", pull(dialect, &args.resolve(database)?)?);
         }
         Command::Status(args) => {
-            let database = required(args.database.or(args.database_pos).or(database), "database")?;
-            for id in status(dialect, &database)? {
+            for id in status(dialect, &args.resolve(database)?)? {
                 println!("{id:06}");
             }
         }
-        Command::Migrate(args) | Command::Rollback(args) => {
-            let database = required(
-                args.database
-                    .database
-                    .or(args.database.database_pos)
-                    .or(database),
-                "database",
-            )?;
-            let migrations = required(
-                args.migrations
-                    .migrations
-                    .or(args.migrations.migrations_pos)
-                    .or(migrations),
-                "migrations",
-            )?;
-            if apply {
-                for id in migrate(dialect, &database, &migrations)? {
-                    println!("Applied {id:06}");
-                }
-            } else if let Some(id) = rollback(dialect, &database, &migrations)? {
+        Command::Migrate(args) => {
+            let database = args.database.resolve(database)?;
+            let migrations = args.migrations.resolve(migrations)?;
+            for id in migrate(dialect, &database, &migrations)? {
+                println!("Applied {id:06}");
+            }
+        }
+        Command::Rollback(args) => {
+            let database = args.database.resolve(database)?;
+            let migrations = args.migrations.resolve(migrations)?;
+            if let Some(id) = rollback(dialect, &database, &migrations)? {
                 println!("Rolled back {id:06}");
             }
         }
         Command::Preview {
-            migrations: args_migrations,
-            schema: args_schema,
-        }
-        | Command::Generate {
-            migrations: args_migrations,
-            schema: args_schema,
+            migrations: migrations_args,
+            schema: schema_args,
         } => {
-            let migrations = required(
-                args_migrations
-                    .migrations
-                    .or(args_migrations.migrations_pos)
-                    .or(migrations),
-                "migrations",
-            )?;
-            let schema = required(
-                args_schema.schema.or(args_schema.schema_pos).or(schema),
-                "schema",
-            )?;
-            if show_preview {
-                if let Some((up, down)) = preview(dialect, &migrations, &schema)? {
-                    println!("-- Up\n{up}\n\n-- Down\n{down}");
-                } else {
-                    println!("No schema changes.");
-                }
-            } else if let Some(up) = generate(dialect, &migrations, &schema)? {
+            let migrations = migrations_args.resolve(migrations)?;
+            let schema = schema_args.resolve(schema)?;
+            if let Some((up, down)) = preview(dialect, &migrations, &schema)? {
+                println!("-- Up\n{up}\n\n-- Down\n{down}");
+            } else {
+                println!("No schema changes.");
+            }
+        }
+        Command::Generate {
+            migrations: migrations_args,
+            schema: schema_args,
+        } => {
+            let migrations = migrations_args.resolve(migrations)?;
+            let schema = schema_args.resolve(schema)?;
+            if let Some(up) = generate(dialect, &migrations, &schema)? {
                 println!("Generated {}", up.display());
             } else {
                 println!("No schema changes.");

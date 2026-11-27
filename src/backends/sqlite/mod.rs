@@ -1,7 +1,12 @@
-//! SQLite schema objects, DDL, and migration execution.
+//! SQLite backend.
+//!
+//! The backend provides schema objects, SQL rendering and execution, and
+//! migration history storage. Planning and workflow orchestration are separate.
 
 pub mod driver;
 pub mod ledger;
-pub mod operators;
-pub mod planner;
-pub mod schema;
+pub mod objects;
+pub mod operations;
+pub(crate) mod planner;
+
+pub use super::errors::SqliteError;

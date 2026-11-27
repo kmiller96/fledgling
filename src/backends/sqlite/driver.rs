@@ -1,51 +1,72 @@
-//! Connected SQLite migration execution.
+//! SQLite command execution and main-schema inspection.
 
-use super::{
-    ledger::{self, LEDGER_NAME, SqliteError},
-    operators::quote_identifier,
-};
-use crate::{driver::Driver, migrations::Migration};
-use rusqlite::{Batch, Connection, OpenFlags, Transaction, TransactionBehavior};
 use std::path::Path;
 
-/// SQLite migration backend. Owns a fresh connection so migration SQL cannot
-/// inherit caller-installed hooks, TEMP objects, or attached databases.
+use rusqlite::{
+    Batch, Connection, OpenFlags, Transaction, TransactionBehavior,
+    fallible_iterator::FallibleIterator,
+    hooks::{AuthAction, AuthContext, Authorization},
+};
+
+use super::{
+    SqliteError,
+    ledger::{LEDGER_NAME, SqliteLedger},
+    objects::SqliteObject,
+};
+use crate::{driver::Driver, schema::Schema};
+
+// ----------------------------------------------------------------------------
+// Driver
+// ----------------------------------------------------------------------------
+
+/// How to open an SQLite database file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OpenMode {
+    /// Open an existing database without write access.
+    Read,
+    /// Open for reading and writing, creating the database if needed.
+    Write,
+    /// Open an existing database for reading and writing.
+    WriteExisting,
+}
+
+/// A connected SQLite driver. Executing commands never updates applied history.
 ///
-/// Migration SQL cannot manage transactions, attach databases, modify the
-/// ledger, change SQLite PRAGMAs, or create TEMP schema objects.
+/// The driver expects trusted migration SQL. Its authorizer protects the
+/// transaction and ledger; it is not a general-purpose SQL sandbox.
 pub struct SqliteDriver {
-    pub(super) connection: Connection,
+    connection: Connection,
 }
 
 impl SqliteDriver {
-    pub fn open(path: impl AsRef<Path>) -> Result<Self, SqliteError> {
-        Ok(Self {
-            connection: Connection::open(path)?,
-        })
+    /// Open a database file with the requested access mode.
+    pub fn open(path: &Path, mode: OpenMode) -> Result<Self, SqliteError> {
+        let flags = match mode {
+            OpenMode::Read => OpenFlags::SQLITE_OPEN_READ_ONLY,
+            OpenMode::Write => OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
+            OpenMode::WriteExisting => OpenFlags::SQLITE_OPEN_READ_WRITE,
+        };
+        Self::new(Connection::open_with_flags(path, flags)?)
     }
 
-    pub fn open_read_only(path: &Path) -> Result<Self, SqliteError> {
-        Self::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-    }
-
-    pub fn open_existing(path: &Path) -> Result<Self, SqliteError> {
-        Self::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)
-    }
-
-    fn open_with_flags(path: &Path, flags: OpenFlags) -> Result<Self, SqliteError> {
-        Ok(Self {
-            connection: Connection::open_with_flags(path, flags)?,
-        })
-    }
-
+    /// Open a disposable database that lasts as long as this driver.
     pub fn open_in_memory() -> Result<Self, SqliteError> {
-        Ok(Self {
-            connection: Connection::open_in_memory()?,
-        })
+        Self::new(Connection::open_in_memory()?)
     }
 
-    /// Read replayable main-schema DDL, without the ledger or SQLite-owned objects.
-    pub(super) fn schema_sql(&self) -> Result<Vec<String>, SqliteError> {
+    fn new(connection: Connection) -> Result<Self, SqliteError> {
+        connection.pragma_update(None, "foreign_keys", true)?;
+        Ok(Self { connection })
+    }
+
+    /// Borrow history on this connection without starting a transaction.
+    pub fn ledger(&self) -> SqliteLedger<'_> {
+        SqliteLedger::new(&self.connection)
+    }
+
+    /// Read replayable main-schema DDL, excluding the ledger, automatic
+    /// indexes, and other SQLite-owned objects (including shadow tables).
+    pub fn schema_sql(&self) -> Result<Vec<String>, SqliteError> {
         let mut statement = self.connection.prepare(
             "SELECT s.sql FROM main.sqlite_schema AS s
              WHERE s.sql IS NOT NULL
@@ -53,8 +74,7 @@ impl SqliteDriver {
                AND s.name <> ?1 COLLATE NOCASE
                AND NOT EXISTS (
                    SELECT 1 FROM pragma_table_list AS t
-                   WHERE t.schema = 'main' AND t.type = 'shadow'
-                     AND t.name = s.tbl_name AND s.type <> 'view'
+                   WHERE t.schema = 'main' AND t.type = 'shadow' AND t.name = s.tbl_name
                )
              ORDER BY CASE s.type WHEN 'table' THEN 0 WHEN 'index' THEN 1
                                   WHEN 'view' THEN 2 ELSE 3 END, s.rowid",
@@ -64,104 +84,146 @@ impl SqliteDriver {
             .collect::<rusqlite::Result<_>>()?)
     }
 
-    pub fn pull(&self) -> Result<String, SqliteError> {
-        Ok(self
-            .schema_sql()?
-            .into_iter()
-            .map(|sql| format!("{sql};\n"))
-            .collect())
+    /// Read the live schema as backend objects. The parser may lag SQLite's grammar.
+    pub fn schema(&self) -> Result<Schema<SqliteObject>, SqliteError> {
+        self.schema_sql()?
+            .iter()
+            .map(|sql| SqliteObject::from_sql(sql).map_err(|e| SqliteError::Invalid(e.to_string())))
+            .collect::<Result<Vec<_>, _>>()
+            .map(Schema::new)
     }
 
-    pub(super) fn load_desired_schema(&mut self, sql: &str) -> Result<(), SqliteError> {
-        let tx = self.connection.transaction()?;
-        guarded_batch(&tx, sql)?;
+    pub(super) fn validate_views(&self, schema: &Schema<SqliteObject>) -> Result<(), SqliteError> {
+        use super::{objects::SqliteObjectKind, operations::quote};
+
+        // CREATE VIEW succeeds even when its query cannot resolve.
+        for view in schema
+            .objects()
+            .iter()
+            .filter(|o| o.kind() == SqliteObjectKind::View)
         {
-            // SQLite accepts CREATE VIEW even if the query cannot resolve.
-            let mut views =
-                tx.prepare("SELECT name FROM main.sqlite_schema WHERE type = 'view'")?;
-            for name in views.query_map([], |row| row.get::<_, String>(0))? {
-                let name = quote_identifier(&name?);
-                tx.prepare(&format!("SELECT * FROM main.{name} LIMIT 0"))?;
-            }
+            self.connection.prepare(&format!(
+                "SELECT * FROM main.{} LIMIT 0",
+                quote(view.name())
+            ))?;
         }
-        tx.commit()?;
         Ok(())
     }
 
-    fn run(&mut self, migration: &Migration, up: bool) -> Result<(), SqliteError> {
-        let artifact = if up {
-            &migration.up
-        } else {
-            migration
-                .down
-                .as_ref()
-                .ok_or_else(|| SqliteError::Invalid("migration has no Down SQL".into()))?
-        };
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if up {
-            ledger::ensure(&tx)?;
-            ledger::check_unapplied(&tx, migration.id)?;
-        } else {
-            ledger::check_latest(&tx, migration.id)?;
-        }
-        guarded_batch(&tx, &artifact.sql)?;
-        if up {
-            ledger::append(&tx, migration.id)?;
-        } else {
-            ledger::remove(&tx, migration.id)?;
-        }
-        tx.commit()?;
-        Ok(())
+    /// Start a transaction for a caller coordinating commands and history.
+    pub fn transaction(&mut self) -> Result<SqliteTransaction<'_>, SqliteError> {
+        Ok(SqliteTransaction {
+            transaction: self
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)?,
+            failed: false,
+        })
     }
 }
 
-fn guarded_batch(tx: &Transaction<'_>, sql: &str) -> Result<(), SqliteError> {
-    use rusqlite::fallible_iterator::FallibleIterator;
-    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
-    tx.authorizer(Some(|ctx: AuthContext<'_>| match ctx.action {
-        AuthAction::Transaction { .. }
-        | AuthAction::Savepoint { .. }
-        | AuthAction::Attach { .. }
-        | AuthAction::Detach { .. } => Authorization::Deny,
-        // Bundled virtual-table modules consult the database page size.
-        AuthAction::Pragma {
-            pragma_name,
-            pragma_value: None,
-        } if pragma_name.eq_ignore_ascii_case("page_size") => Authorization::Allow,
-        AuthAction::Pragma { .. } => Authorization::Deny,
-        AuthAction::CreateTempTable { .. }
-        | AuthAction::CreateTempIndex { .. }
-        | AuthAction::CreateTempTrigger { .. }
-        | AuthAction::CreateTempView { .. }
-        | AuthAction::DropTempTable { .. }
-        | AuthAction::DropTempIndex { .. }
-        | AuthAction::DropTempTrigger { .. }
-        | AuthAction::DropTempView { .. } => Authorization::Deny,
-        AuthAction::Insert { table_name }
-        | AuthAction::Update { table_name, .. }
-        | AuthAction::Delete { table_name }
-        | AuthAction::CreateIndex { table_name, .. }
-        | AuthAction::DropIndex { table_name, .. }
-        | AuthAction::CreateTrigger { table_name, .. }
-        | AuthAction::DropTrigger { table_name, .. }
-        | AuthAction::DropTable { table_name }
-        | AuthAction::AlterTable { table_name, .. }
-            if table_name.eq_ignore_ascii_case(LEDGER_NAME) =>
-        {
-            Authorization::Deny
+impl Driver for SqliteDriver {
+    type Error = SqliteError;
+
+    /// Execute the entire batch in one transaction.
+    fn execute(&mut self, commands: &str) -> Result<(), Self::Error> {
+        let mut transaction = self.transaction()?;
+        transaction.execute(commands)?;
+        transaction.commit()
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Shared transaction
+// ----------------------------------------------------------------------------
+
+/// A batch executor and ledger handle sharing one SQLite transaction.
+///
+/// Propagate both execution and ledger errors before calling [`Self::commit`].
+/// Dropping the transaction without committing rolls back both kinds of writes.
+///
+/// ```
+/// use fledgling::{backends::sqlite::driver::SqliteDriver, driver::Driver, migrations::Ledger};
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let mut driver = SqliteDriver::open_in_memory()?;
+/// let mut tx = driver.transaction()?;
+/// tx.execute("CREATE TABLE books (id INTEGER PRIMARY KEY);")?;
+/// tx.ledger()?.commit(1)?;
+/// tx.commit()?;
+/// assert_eq!(driver.ledger().list()?, [1]);
+/// # Ok(())
+/// # }
+/// ```
+pub struct SqliteTransaction<'a> {
+    transaction: Transaction<'a>,
+    failed: bool,
+}
+
+impl SqliteTransaction<'_> {
+    fn check_active(&self) -> Result<(), SqliteError> {
+        if self.failed || self.transaction.is_autocommit() {
+            Err(SqliteError::Invalid(
+                "migration transaction is no longer usable".into(),
+            ))
+        } else {
+            Ok(())
         }
-        _ => Authorization::Allow,
-    }))?;
+    }
+
+    /// Borrow history inside this transaction, so changes roll back with SQL.
+    pub fn ledger(&self) -> Result<SqliteLedger<'_>, SqliteError> {
+        self.check_active()?;
+        Ok(SqliteLedger::new(&self.transaction))
+    }
+
+    /// Commit SQL and history together. A failed SQL batch prevents commit.
+    pub fn commit(self) -> Result<(), SqliteError> {
+        self.check_active()?;
+        Ok(self.transaction.commit()?)
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Batch execution and authorization
+// ----------------------------------------------------------------------------
+
+impl Driver for SqliteTransaction<'_> {
+    type Error = SqliteError;
+
+    fn execute(&mut self, commands: &str) -> Result<(), Self::Error> {
+        self.check_active()?;
+        let result = execute_batch(&self.transaction, commands);
+        self.failed = result.is_err();
+        result
+    }
+}
+
+// Guard the caller's transaction and reserved ledger while stepping every
+// statement to completion (including statements with RETURNING rows).
+fn execute_batch(transaction: &Transaction<'_>, sql: &str) -> Result<(), SqliteError> {
+    if sql.contains('\0') {
+        return Err(SqliteError::Invalid("SQL contains a NUL byte".into()));
+    }
+    let reserved_objects = || -> rusqlite::Result<i64> {
+        transaction.query_row(
+            "SELECT count(*) FROM main.sqlite_schema WHERE name = ?1 COLLATE NOCASE",
+            [LEDGER_NAME],
+            |row| row.get(0),
+        )
+    };
+    let before = reserved_objects()?;
+    transaction.authorizer(Some(authorize))?;
     let result = (|| {
-        let mut batch = Batch::new(tx, sql);
+        let mut batch = Batch::new(transaction, sql);
         while let Some(mut statement) = batch.next()? {
+            if statement.parameter_count() != 0 {
+                return Err(SqliteError::Invalid(
+                    "migration SQL cannot use unbound parameters".into(),
+                ));
+            }
             let mut rows = statement.raw_query();
             while rows.next()?.is_some() {}
-            drop(rows);
-            drop(statement);
-            if tx.is_autocommit() {
+            if transaction.is_autocommit() {
                 return Err(SqliteError::Invalid(
                     "migration transaction ended unexpectedly".into(),
                 ));
@@ -169,166 +231,218 @@ fn guarded_batch(tx: &Transaction<'_>, sql: &str) -> Result<(), SqliteError> {
         }
         Ok(())
     })();
-    let cleanup = tx.authorizer(None::<fn(rusqlite::hooks::AuthContext<'_>) -> Authorization>);
-    cleanup?;
-    result
+    transaction.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)?;
+    result?;
+    // SQLite's ALTER TABLE authorizer reports the old name, not the new name.
+    if reserved_objects()? != before {
+        return Err(SqliteError::Invalid(format!(
+            "{LEDGER_NAME} is reserved for migration history"
+        )));
+    }
+    Ok(())
 }
 
-impl Driver for SqliteDriver {
-    fn apply(&mut self, migration: &Migration) -> Result<(), Self::Error> {
-        self.run(migration, true)
-    }
-    fn revert(&mut self, migration: &Migration) -> Result<(), Self::Error> {
-        self.run(migration, false)
+fn authorize(context: AuthContext<'_>) -> Authorization {
+    use AuthAction::*;
+    let reserved = |name: &str| name.eq_ignore_ascii_case(LEDGER_NAME);
+    let denied = match context.action {
+        Transaction { .. }
+        | Savepoint { .. }
+        | Attach { .. }
+        | Detach { .. }
+        | CreateTempTable { .. }
+        | CreateTempIndex { .. }
+        | CreateTempTrigger { .. }
+        | CreateTempView { .. }
+        | DropTempTable { .. }
+        | DropTempIndex { .. }
+        | DropTempTrigger { .. }
+        | DropTempView { .. } => true,
+        // Virtual tables don't have a separate temp action.
+        CreateVtable { .. } | DropVtable { .. } if context.database_name == Some("temp") => true,
+        // The bundled FTS module reads the page size when opening a virtual table.
+        Pragma {
+            pragma_name,
+            pragma_value,
+        } => !pragma_name.eq_ignore_ascii_case("page_size") || pragma_value.is_some(),
+        Insert { table_name }
+        | Delete { table_name }
+        | Update { table_name, .. }
+        | AlterTable { table_name, .. }
+        | CreateTable { table_name }
+        | DropTable { table_name }
+        | CreateVtable { table_name, .. }
+        | DropVtable { table_name, .. } => reserved(table_name),
+        CreateIndex {
+            index_name,
+            table_name,
+        }
+        | DropIndex {
+            index_name,
+            table_name,
+        } => reserved(index_name) || reserved(table_name),
+        CreateTrigger {
+            trigger_name,
+            table_name,
+        }
+        | DropTrigger {
+            trigger_name,
+            table_name,
+        } => reserved(trigger_name) || reserved(table_name),
+        CreateView { view_name } | DropView { view_name } => reserved(view_name),
+        _ => false,
+    };
+    if denied {
+        Authorization::Deny
+    } else {
+        Authorization::Allow
     }
 }
+
+// ----------------------------------------------------------------------------
+// Tests
+// ----------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backends::sqlite::{
-        operators::{Operator, QualifiedName},
-        schema::{SchemaObject, SchemaObjectKind},
+    use crate::{
+        backends::sqlite::{objects::SqliteObjectKind, operations::SqliteOperation},
+        migrations::{Ledger, Operation},
     };
-    use crate::migrations::{AppliedMigration, Artifact, Ledger, tests::assert_commit_list_revert};
 
-    fn migration(id: u64, up: &str, down: Option<&str>) -> Migration {
-        Migration {
-            id,
-            up: Artifact {
-                path: "up.sql".into(),
-                sql: up.into(),
+    #[test]
+    fn executes_rendered_ddl_with_quoted_names() {
+        use SqliteOperation::*;
+
+        let mut driver = SqliteDriver::open_in_memory().unwrap();
+        let table = "items.\"";
+        for operation in [
+            Create(
+                SqliteObject::from_sql("CREATE TABLE [items.\"](id INTEGER) -- comment").unwrap(),
+            ),
+            AddColumn {
+                table: table.into(),
+                definition: "label TEXT".into(),
             },
-            down: down.map(|sql| Artifact {
-                path: "down.sql".into(),
-                sql: sql.into(),
-            }),
+            RenameColumn {
+                table: table.into(),
+                column: "label".into(),
+                new_name: "title".into(),
+            },
+            AddCheck {
+                table: table.into(),
+                name: "id check".into(),
+                expression: "id > 0".into(),
+            },
+            SetNotNull {
+                table: table.into(),
+                column: "title".into(),
+                not_null: true,
+            },
+        ] {
+            driver.execute(&operation.render().unwrap()).unwrap();
         }
-    }
-
-    #[test]
-    fn implements_shared_ledger_contract() {
-        assert_commit_list_revert(SqliteDriver::open_in_memory().unwrap());
-    }
-
-    #[test]
-    fn preserves_u64_and_rolls_back_failed_batch() {
-        let mut driver = SqliteDriver::open_in_memory().unwrap();
-        let id = u64::MAX;
-        driver.commit(AppliedMigration { id }).unwrap();
-        assert_eq!(driver.list().unwrap()[0].id, id);
-        let error = driver.apply(&migration(
-            3,
-            "CREATE TABLE transient(x); SELECT * FROM missing;",
-            Some("DROP TABLE transient;"),
-        ));
-        assert!(error.is_err());
-        let exists: bool = driver
-            .connection
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM main.sqlite_schema WHERE name='transient')",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert!(!exists);
-        assert_eq!(driver.list().unwrap()[0].id, id);
-    }
-
-    #[test]
-    fn rejects_transaction_control_without_breaking_atomicity() {
-        let mut driver = SqliteDriver::open_in_memory().unwrap();
-        let error = driver.apply(&migration(
-            1,
-            "CREATE TABLE x(a); COMMIT;",
-            Some("DROP TABLE x;"),
-        ));
-        assert!(error.is_err());
-        assert!(driver.list().unwrap().is_empty());
-        let exists: bool = driver
-            .connection
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM main.sqlite_schema WHERE name='x')",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert!(!exists);
-    }
-
-    #[test]
-    fn applies_and_reverts_rendered_schema_operations() {
-        let mut driver = SqliteDriver::open_in_memory().unwrap();
-        let create = Operator::Create(
-            SchemaObject::from_sql("CREATE TABLE items (id INTEGER) -- table").unwrap(),
-        );
-        let add = Operator::AddColumn {
-            table: QualifiedName::new("items"),
-            column_definition: "name TEXT".into(),
-        };
-        let drop = Operator::Drop {
-            kind: SchemaObjectKind::Table,
-            name: QualifiedName::new("items"),
-            if_exists: false,
-        };
-        let up = format!("{}\n{}", create.to_sql(), add.to_sql());
-        let migration = migration(1, &up, Some(&drop.to_sql()));
-
-        driver.apply(&migration).unwrap();
-        assert_eq!(driver.list().unwrap(), [AppliedMigration { id: 1 }]);
-        assert!(driver.connection.prepare("SELECT name FROM items").is_ok());
-        Driver::revert(&mut driver, &migration).unwrap();
-        assert!(driver.list().unwrap().is_empty());
-        assert!(driver.connection.prepare("SELECT name FROM items").is_err());
-    }
-
-    #[test]
-    fn reads_without_initializing_and_rejects_legacy_history() {
-        let mut driver = SqliteDriver::open_in_memory().unwrap();
-        assert!(driver.list().unwrap().is_empty());
-        driver
-            .connection
-            .execute_batch(
-                "CREATE TABLE _fledgling_migrations (id INTEGER PRIMARY KEY, digest BLOB);",
-            )
-            .unwrap();
         assert!(
             driver
-                .list()
-                .unwrap_err()
-                .to_string()
-                .contains("incompatible")
-        );
-        assert!(
-            driver
-                .apply(&migration(1, "CREATE TABLE items (id);", None))
+                .execute("INSERT INTO [items.\"] VALUES (1, NULL)")
                 .is_err()
         );
+        assert!(
+            driver
+                .execute("INSERT INTO [items.\"] VALUES (0, 'title')")
+                .is_err()
+        );
+        for operation in [
+            DropCheck {
+                table: table.into(),
+                name: "id check".into(),
+            },
+            SetNotNull {
+                table: table.into(),
+                column: "title".into(),
+                not_null: false,
+            },
+            DropColumn {
+                table: table.into(),
+                column: "title".into(),
+            },
+            RenameTable {
+                table: table.into(),
+                new_name: "renamed".into(),
+            },
+            Drop {
+                kind: SqliteObjectKind::Table,
+                name: "renamed".into(),
+            },
+        ] {
+            driver.execute(&operation.render().unwrap()).unwrap();
+        }
+        assert!(driver.schema().unwrap().objects().is_empty());
     }
 
     #[test]
-    fn failed_down_keeps_schema_and_history() {
+    fn inspects_user_objects_without_ledger_or_internal_tables() {
         let mut driver = SqliteDriver::open_in_memory().unwrap();
-        let migration = migration(
-            1,
-            "CREATE TABLE items (id);",
-            Some("DROP TABLE items; DELETE FROM main._fledgling_migrations;"),
-        );
-        driver.apply(&migration).unwrap();
-        assert!(Driver::revert(&mut driver, &migration).is_err());
-        assert_eq!(driver.list().unwrap(), [AppliedMigration { id: 1 }]);
-        assert!(driver.connection.prepare("SELECT id FROM items").is_ok());
+        driver
+            .execute(
+                "CREATE TABLE items(id INTEGER PRIMARY KEY AUTOINCREMENT, label UNIQUE);
+             CREATE INDEX items_label ON items(label);
+             CREATE VIEW labels AS SELECT label FROM items;
+             CREATE TRIGGER items AFTER INSERT ON items BEGIN SELECT 1; SELECT 2; END;
+             CREATE VIRTUAL TABLE docs USING fts5(body);
+             INSERT INTO docs VALUES ('example');",
+            )
+            .unwrap();
+        driver.ledger().commit(1).unwrap();
+        let schema = driver.schema().unwrap();
+        let names: Vec<_> = schema.objects().iter().map(SqliteObject::name).collect();
+        assert_eq!(names, ["items", "docs", "items_label", "labels", "items"]);
     }
 
     #[test]
-    fn applies_virtual_table_ddl() {
+    fn shares_a_transaction_without_execution_owning_history() {
         let mut driver = SqliteDriver::open_in_memory().unwrap();
-        let migration = migration(
-            1,
-            "CREATE VIRTUAL TABLE docs USING fts5(body); INSERT INTO docs VALUES ('example');",
-            Some("DROP TABLE docs;"),
+        let mut tx = driver.transaction().unwrap();
+        tx.execute("CREATE TABLE items(id);").unwrap();
+        tx.ledger().unwrap().commit(8).unwrap();
+        tx.commit().unwrap();
+
+        let mut tx = driver.transaction().unwrap();
+        tx.ledger().unwrap().uncommit(8).unwrap();
+        assert!(
+            tx.execute("DROP TABLE items; SELECT * FROM missing;")
+                .is_err()
         );
-        driver.apply(&migration).unwrap();
-        Driver::revert(&mut driver, &migration).unwrap();
+        assert!(tx.commit().is_err());
+        assert_eq!(driver.ledger().list().unwrap(), [8]);
+        assert_eq!(driver.schema().unwrap().objects()[0].name(), "items");
+    }
+
+    #[test]
+    fn rejects_batch_commands_that_can_break_history_or_atomicity() {
+        let mut driver = SqliteDriver::open_in_memory().unwrap();
+        assert!(
+            driver
+                .execute("CREATE TABLE t(id); ALTER TABLE t RENAME TO __migrations;")
+                .is_err()
+        );
+        driver.ledger().commit(1).unwrap();
+        for sql in [
+            "COMMIT",
+            "CREATE TEMP TABLE temp_items(id)",
+            "DELETE FROM main.__migrations",
+            "PRAGMA foreign_keys = OFF",
+            "INSERT INTO items VALUES (?)",
+        ] {
+            assert!(
+                driver
+                    .execute(&format!("CREATE TABLE items(id); {sql}"))
+                    .is_err(),
+                "{sql}"
+            );
+            assert!(driver.schema().unwrap().objects().is_empty());
+        }
+        assert_eq!(driver.ledger().list().unwrap(), [1]);
     }
 }

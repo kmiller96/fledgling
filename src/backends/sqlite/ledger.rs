@@ -1,162 +1,152 @@
-//! SQLite storage for applied migration records.
+//! SQLite storage for applied migration IDs.
+//!
+use rusqlite::{Connection, OptionalExtension};
 
-use super::driver::SqliteDriver;
-use crate::migrations::{AppliedMigration, Ledger};
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
-use std::{error::Error, fmt};
+use super::SqliteError;
+use crate::migrations::Ledger;
 
-pub(super) const LEDGER_NAME: &str = "_fledgling_migrations";
+// ----------------------------------------------------------------------------
+// Storage format
+// ----------------------------------------------------------------------------
 
-// SQLite omits the main qualifier in sqlite_schema.sql. An explicit integer
-// primary key preserves application order even when the database is vacuumed.
-const CREATE: &str =
-    "CREATE TABLE _fledgling_migrations (position INTEGER PRIMARY KEY, id TEXT NOT NULL UNIQUE)";
+pub(super) const LEDGER_NAME: &str = "__migrations";
 
-/// An SQLite operation or migration contract failed.
-#[derive(Debug)]
-pub enum SqliteError {
-    Sqlite(rusqlite::Error),
-    Invalid(String),
+// Separate position from ID: order is application order, and text IDs retain
+// the entire u64 range, which does not fit SQLite's signed INTEGER type.
+const DEFINITION: &str = "(position INTEGER PRIMARY KEY, id TEXT NOT NULL UNIQUE)";
+
+// ----------------------------------------------------------------------------
+// Ledger
+// ----------------------------------------------------------------------------
+
+/// Migration history stored in SQLite's main schema. Can borrow a transaction
+/// so that the history update commits together with the migration's SQL.
+///
+/// Reading an uninitialized ledger returns an empty history without creating
+/// the table. The first commit initializes it; incompatible formats are rejected.
+pub struct SqliteLedger<'a> {
+    connection: &'a Connection,
 }
 
-impl fmt::Display for SqliteError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Sqlite(error) => error.fmt(f),
-            Self::Invalid(message) => f.write_str(message),
-        }
+impl<'a> SqliteLedger<'a> {
+    pub(super) fn new(connection: &'a Connection) -> Self {
+        Self { connection }
     }
-}
 
-impl Error for SqliteError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Sqlite(error) => Some(error),
-            Self::Invalid(_) => None,
-        }
-    }
-}
-
-impl From<rusqlite::Error> for SqliteError {
-    fn from(error: rusqlite::Error) -> Self {
-        Self::Sqlite(error)
-    }
-}
-
-fn exists(conn: &Connection) -> Result<bool, SqliteError> {
-    let object = conn
-        .query_row(
-            "SELECT type, sql FROM main.sqlite_schema
-             WHERE name = ?1 COLLATE NOCASE AND type <> 'trigger'",
+    fn exists(&self) -> Result<bool, SqliteError> {
+        let sql: Option<Option<String>> = self.connection.query_row(
+            "SELECT sql FROM main.sqlite_schema WHERE name = ?1 COLLATE NOCASE AND type <> 'trigger'",
             [LEDGER_NAME],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
-        )
-        .optional()?;
-    match object {
-        None => Ok(false),
-        Some((kind, Some(sql))) if kind == "table" && sql == CREATE => Ok(true),
-        _ => Err(SqliteError::Invalid(
-            "incompatible _fledgling_migrations ledger format; explicit migration required".into(),
-        )),
+            |row| row.get(0),
+        ).optional()?;
+        match sql {
+            None => Ok(false),
+            Some(Some(sql)) if sql == format!("CREATE TABLE {LEDGER_NAME} {DEFINITION}") => {
+                Ok(true)
+            }
+            _ => Err(SqliteError::Invalid(format!(
+                "incompatible {LEDGER_NAME} ledger format; explicit migration required"
+            ))),
+        }
     }
 }
 
-pub(super) fn ensure(conn: &Connection) -> Result<(), SqliteError> {
-    if !exists(conn)? {
-        conn.execute(CREATE, [])?;
-    }
-    Ok(())
-}
-
-pub(super) fn check_unapplied(conn: &Connection, id: u64) -> Result<(), SqliteError> {
-    let applied: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM main._fledgling_migrations WHERE id = ?1)",
-        [id.to_string()],
-        |row| row.get(0),
-    )?;
-    if applied {
-        return Err(SqliteError::Invalid("migration already applied".into()));
-    }
-    Ok(())
-}
-
-pub(super) fn check_latest(conn: &Connection, id: u64) -> Result<(), SqliteError> {
-    let latest = if exists(conn)? {
-        conn.query_row(
-            "SELECT id FROM main._fledgling_migrations ORDER BY position DESC LIMIT 1",
-            [],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()?
-    } else {
-        None
-    };
-    if latest.as_deref() != Some(id.to_string().as_str()) {
-        return Err(SqliteError::Invalid(
-            "migration is not the latest applied".into(),
-        ));
-    }
-    Ok(())
-}
-
-pub(super) fn append(conn: &Connection, id: u64) -> Result<(), SqliteError> {
-    conn.execute(
-        "INSERT INTO main._fledgling_migrations (id) VALUES (?1)",
-        [id.to_string()],
-    )?;
-    Ok(())
-}
-
-pub(super) fn remove(conn: &Connection, id: u64) -> Result<(), SqliteError> {
-    conn.execute(
-        "DELETE FROM main._fledgling_migrations WHERE id = ?1",
-        [id.to_string()],
-    )?;
-    Ok(())
-}
-
-impl Ledger for SqliteDriver {
+impl Ledger for SqliteLedger<'_> {
     type Error = SqliteError;
 
-    fn list(&self) -> Result<Vec<AppliedMigration>, Self::Error> {
-        // An uninitialized ledger is empty; do not create it on this path.
-        if !exists(&self.connection)? {
-            return Ok(vec![]);
+    fn list(&self) -> Result<Vec<u64>, Self::Error> {
+        if !self.exists()? {
+            return Ok(Vec::new());
         }
-        let mut stmt = self
-            .connection
-            .prepare("SELECT id FROM main._fledgling_migrations ORDER BY position")?;
-        let ids = stmt.query_map([], |row| row.get::<_, String>(0))?;
-        ids.map(|value| {
-            let value = value?;
-            let id = value
-                .parse::<u64>()
-                .ok()
-                .filter(|id| id.to_string() == value)
-                .ok_or_else(|| SqliteError::Invalid("invalid ID in migration ledger".into()))?;
-            Ok(AppliedMigration { id })
-        })
-        .collect()
+        let mut statement = self.connection.prepare(&format!(
+            "SELECT id FROM main.{LEDGER_NAME} ORDER BY position"
+        ))?;
+        statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .map(|value| {
+                let value = value?;
+                value
+                    .parse::<u64>()
+                    .ok()
+                    .filter(|id| id.to_string() == value)
+                    .ok_or_else(|| SqliteError::Invalid("invalid ID in migration ledger".into()))
+            })
+            .collect()
     }
 
-    fn commit(&mut self, migration: AppliedMigration) -> Result<(), Self::Error> {
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        ensure(&tx)?;
-        check_unapplied(&tx, migration.id)?;
-        append(&tx, migration.id)?;
-        tx.commit()?;
+    fn commit(&mut self, id: u64) -> Result<(), Self::Error> {
+        if !self.exists()? {
+            self.connection.execute(
+                &format!("CREATE TABLE IF NOT EXISTS main.{LEDGER_NAME} {DEFINITION}"),
+                [],
+            )?;
+            self.exists()?;
+        }
+        self.connection.execute(
+            &format!("INSERT INTO main.{LEDGER_NAME} (id) VALUES (?1)"),
+            [id.to_string()],
+        )?;
         Ok(())
     }
 
-    fn revert(&mut self, id: u64) -> Result<(), Self::Error> {
-        let tx = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        check_latest(&tx, id)?;
-        remove(&tx, id)?;
-        tx.commit()?;
-        Ok(())
+    fn uncommit(&mut self, id: u64) -> Result<(), Self::Error> {
+        if self.exists()?
+            && self.connection.execute(
+                &format!(
+                    "DELETE FROM main.{LEDGER_NAME}
+                     WHERE position = (SELECT max(position) FROM main.{LEDGER_NAME}) AND id = ?1"
+                ),
+                [id.to_string()],
+            )? == 1
+        {
+            Ok(())
+        } else {
+            Err(SqliteError::Invalid(format!(
+                "migration {id} is not the latest applied"
+            )))
+        }
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Tests
+// ----------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stores_full_ids_in_application_order_and_only_removes_the_latest() {
+        let database = Connection::open_in_memory().unwrap();
+        let mut ledger = SqliteLedger::new(&database);
+        assert!(ledger.list().unwrap().is_empty());
+        assert!(ledger.uncommit(1).is_err());
+        assert!(!ledger.exists().unwrap());
+        ledger.commit(u64::MAX).unwrap();
+        ledger.commit(1).unwrap();
+        assert!(ledger.commit(u64::MAX).is_err());
+        assert!(ledger.uncommit(u64::MAX).is_err());
+        assert_eq!(ledger.list().unwrap(), [u64::MAX, 1]);
+        ledger.uncommit(1).unwrap();
+        ledger.uncommit(u64::MAX).unwrap();
+        assert!(ledger.list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn refuses_to_overwrite_a_legacy_ledger() {
+        let database = Connection::open_in_memory().unwrap();
+        database
+            .execute("CREATE TABLE __migrations (id INTEGER PRIMARY KEY)", [])
+            .unwrap();
+        let mut ledger = SqliteLedger::new(&database);
+        assert!(
+            ledger
+                .list()
+                .unwrap_err()
+                .to_string()
+                .contains("incompatible")
+        );
+        assert!(ledger.commit(1).is_err());
     }
 }

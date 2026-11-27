@@ -90,7 +90,7 @@ fn sqlite(fixture: Fixture<&str>) {
     assert!(migrate(dialect, &database, migrations).unwrap().is_empty());
 
     let pulled = pull(dialect, &database).unwrap();
-    assert!(!pulled.contains("_fledgling_migrations"));
+    assert!(!pulled.contains("__migrations"));
     assert_schema(&reference(&pulled), &target, "pull");
 
     assert_eq!(rollback(dialect, &database, migrations).unwrap(), Some(id));
@@ -214,7 +214,8 @@ fn generation_refuses_to_replace_existing_files() {
     let down = migrations.join("000001.down.sql");
     fs::write(&schema, "CREATE TABLE books (id);").unwrap();
     fs::write(&down, "keep this file").unwrap();
-    assert!(generate(Dialect::SQLite, migrations, &schema).is_err());
+    let error = generate(Dialect::SQLite, migrations, &schema).unwrap_err();
+    assert!(error.to_string().contains("000001.down.sql"), "{error}");
     assert_eq!(read(&down), "keep this file");
     assert!(!migrations.join("000001.up.sql").exists());
 }
@@ -256,16 +257,23 @@ fn rejects_executable_sql_and_unresolved_views_in_the_desired_schema() {
     let workspace = Workspace::new();
     let migrations = &workspace.0;
     let schema = migrations.join("schema.sql");
-    for sql in [
-        "CREATE TABLE books (id); INSERT INTO books VALUES (1);",
-        "CREATE VIEW books AS SELECT * FROM missing;",
-        "CREATE TABLE books (id); CREATE TABLE IF NOT EXISTS BOOKS (other);",
+    for (sql, expected) in [
+        (
+            "CREATE TABLE books (id); INSERT INTO books VALUES (1);",
+            "only persistent CREATE declarations",
+        ),
+        (
+            "CREATE VIEW books AS SELECT * FROM missing;",
+            "no such table: main.missing",
+        ),
+        (
+            "CREATE TABLE books (id); CREATE TABLE IF NOT EXISTS BOOKS (other);",
+            "duplicate object in desired schema",
+        ),
     ] {
         fs::write(&schema, sql).unwrap();
-        assert!(
-            generate(Dialect::SQLite, migrations, &schema).is_err(),
-            "{sql}"
-        );
+        let error = generate(Dialect::SQLite, migrations, &schema).unwrap_err();
+        assert!(error.to_string().contains(expected), "{sql}: {error}");
     }
     assert!(!migrations.join("000001.up.sql").exists());
 }
@@ -316,14 +324,14 @@ fn assert_schema(actual: &Connection, expected: &Connection, phase: &str) {
             "objects",
             "SELECT type, name, tbl_name, CASE WHEN type = 'table' THEN NULL ELSE rtrim(sql, char(10) || char(13) || ' ') END
                FROM main.sqlite_schema
-              WHERE name <> '_fledgling_migrations' AND sql IS NOT NULL
+              WHERE name <> '__migrations' AND sql IS NOT NULL
               ORDER BY type, name",
         ),
         (
             "table columns",
             "SELECT s.name, p.cid, p.name, p.type, p.\"notnull\", p.dflt_value, p.pk, p.hidden
                FROM main.sqlite_schema AS s JOIN pragma_table_xinfo(s.name, 'main') AS p
-              WHERE s.type = 'table' AND s.name <> '_fledgling_migrations'
+              WHERE s.type = 'table' AND s.name <> '__migrations'
               ORDER BY s.name, p.cid",
         ),
     ] {

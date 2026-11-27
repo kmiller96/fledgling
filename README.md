@@ -40,6 +40,10 @@ CREATE TABLE books (
 );
 ```
 
+### Planned migration workflow
+
+The commands below are not yet wired up on this branch.
+
 Fledgling compares your target schema with the schema from your migration
 history, not your live database.
 
@@ -101,21 +105,20 @@ overlapping runs. For automated deployments, use a single migration job.
 
 ## Architecture
 
-SQLite is the only supported database. `schema::Diff` is a vector of logical
-object changes, not execution order. SQLite lowers those changes into ordered SQL.
-`Change::invert` is a logical helper only; SQLite derives Down SQL from the
-selected DDL.
+`schema` models backend-defined objects. `planner::ChangeSet` describes logical
+changes, not execution order. `Change::invert` does not guarantee reversibility.
+Backends will lower changes into ordered `migrations::Operation`s and render
+them as commands in their own language.
 
-The SQLite planner is offline and owns its internal schema model and additive
-planner. Users write SQL, not a schema DSL. It parses SQL into that model,
-renders its operations as SQLite DDL, and verifies Up and Down in SQLite.
-Connection-bound execution commits each migration or rollback with its ledger
-update in one transaction.
+`migrations` defines the Up/Down file boundary and the independent `Ledger`
+contract. `driver::Driver` executes migration commands without
+owning applied history. A database-backed ledger can share a transaction with
+execution; an external ledger needs a separate coordination and recovery policy.
 
-The Rust API exposes `pull`, `preview`, `generate`, `migrate`, `status`, and
-`rollback`. Pass `Dialect::SQLite` and the paths required by the workflow.
-Backend, schema, migration-file, and ledger types are internal. Applied
-history is checked against the ordered migration IDs, not file contents.
+SQLite implements schema inspection, DDL rendering and execution, and ledger
+storage. The library's `pull` and `status` functions are wired up. Migration
+file persistence, planning, workflow coordination, and CLI commands other than
+`init` are not wired up yet.
 
 ## Motivation
 
