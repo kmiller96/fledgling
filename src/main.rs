@@ -4,6 +4,7 @@ use clap::{Args, Parser, Subcommand};
 use std::{path::PathBuf, process::ExitCode};
 
 mod config;
+mod scaffold;
 
 // ----------------------------------------------------------------------------
 // CLI Definition
