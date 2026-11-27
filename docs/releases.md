@@ -7,9 +7,10 @@ not publish anything.
 To release, open **Actions → Release → Run workflow**, leave the default branch
 selected, and choose `patch`, `minor`, or `major`. The workflow updates
 `Cargo.toml` and `Cargo.lock`, validates the release commit, pushes it with its
-`vX.Y.Z` tag, then publishes the crate to crates.io. The release runs the same
-checks as CI. GitHub does not start another push workflow for the automation's
-commit. crates.io hosts the source package, not a prebuilt binary.
+`vX.Y.Z` tag, then publishes the crate to crates.io. It also builds Linux
+x86_64, macOS Intel and Apple Silicon, and Windows x86_64 binaries, attaching
+archives to a GitHub Release for the new tag. The release runs the same checks
+as CI. GitHub does not start another push workflow for the automation's commit.
 
 ## One-time setup
 

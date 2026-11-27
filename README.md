@@ -5,6 +5,18 @@ migrations.
 
 ## Installation
 
+macOS and Linux:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/kmiller96/fledgling/main/install.sh | bash
+```
+
+The installer places `fledgling` in `~/.local/bin`. Set `FLEDGLING_INSTALL_DIR`
+to choose another location. Windows users can download the `.zip` binary from
+the [latest GitHub Release](https://github.com/kmiller96/fledgling/releases/latest).
+
+Alternatively, install from crates.io:
+
 ```sh
 cargo install fledgling
 ```

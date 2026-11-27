@@ -21,6 +21,7 @@ registry_status() {
 
 versions=$(python3 .github/scripts/bump-version.py "$1")
 read -r current version <<< "$versions"
+echo "version=$version" >> "$GITHUB_OUTPUT"
 tag="refs/tags/v$version"
 tagged_commit=$(git ls-remote --refs origin "$tag" | cut -f1)
 
