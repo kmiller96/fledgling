@@ -1,8 +1,9 @@
 # Releases
 
-CI checks pull requests and the default branch. Each passing push to the
-default branch also produces a Linux binary in that run's artifacts; CI does
-not publish anything.
+CI checks pull requests and the default branch. Each push to the default branch
+also builds Linux, macOS Intel and Apple Silicon, and Windows binaries from that
+exact commit; download them from that run's artifacts. CI does not publish
+anything.
 
 To release, open **Actions → Release → Run workflow**, leave the default branch
 selected, and choose `patch`, `minor`, or `major`. The workflow updates
@@ -11,6 +12,11 @@ selected, and choose `patch`, `minor`, or `major`. The workflow updates
 x86_64, macOS Intel and Apple Silicon, and Windows x86_64 binaries, attaching
 archives to a GitHub Release for the new tag. The release runs the same checks
 as CI. GitHub does not start another push workflow for the automation's commit.
+
+To rebuild binaries for the current latest published GitHub Release without
+creating a release, open **Actions → Build latest release → Run workflow**.
+The workflow checks out that release's version tag and uploads platform
+archives as run artifacts; it does not publish or modify the GitHub Release.
 
 ## One-time setup
 
