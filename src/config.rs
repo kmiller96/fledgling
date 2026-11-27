@@ -1,8 +1,10 @@
-//! Project configuration and TOML file serialization.
+//! Defines the CLI's project configuration and its TOML representation.
 //!
-//! The `[fledgling]` section selects the dialect and can supply paths for the
-//! CLI. Paths loaded from disk are anchored to the config
-//! file rather than to the caller's working directory.
+//! [`Config`] stores the selected SQL dialect and optional schema, migrations,
+//! and database paths. This module reads and writes the `[fledgling]` TOML
+//! section, including SQLite `database_url` conversion. Paths read from disk
+//! are resolved relative to the config file; reading does not check or open
+//! the referenced files or database.
 
 use std::{
     error::Error,
