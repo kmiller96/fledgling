@@ -1,0 +1,1 @@
+cannot add column books.author: new columns on existing tables must be nullable; remove NOT NULL or write a migration that backfills existing rows and enforces the constraint

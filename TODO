@@ -1,0 +1,11 @@
+[ ] Handle table renames and don't assume it's a create/delete
+[ ] Add migration content digests for ledger verification
+
+[ ] Clean up code
+    [X] config
+    [ ] lib
+    [ ] main
+    [ ] migrations (<- migrations_v2)
+    [X] scaffold
+    [X] schema
+    [ ] sqlite

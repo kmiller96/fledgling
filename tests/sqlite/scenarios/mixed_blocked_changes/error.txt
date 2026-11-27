@@ -1,0 +1,1 @@
+removing table shipments is not supported
